@@ -32,7 +32,6 @@ export async function POST(req: Request) {
     const agentKit = await initAgentKit({
       evmRpcUrl:
         process.env.ETH_SEPOLIA_RPC_URL
-        ?? process.env.BASE_SEPOLIA_RPC_URL
         ?? 'https://ethereum-sepolia-rpc.publicnode.com',
       accessToken: tokenToVerify ?? '',
     });

@@ -106,7 +106,6 @@ export async function POST(req: Request) {
         accessToken,
         evmRpcUrl:
           process.env.ETH_SEPOLIA_RPC_URL
-          ?? process.env.BASE_SEPOLIA_RPC_URL
           ?? 'https://ethereum-sepolia-rpc.publicnode.com',
       });
       return actions as unknown as ActionLike[];

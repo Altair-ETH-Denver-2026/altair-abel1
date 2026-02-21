@@ -54,6 +54,9 @@ export default function UserMenu() {
         });
 
         const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error || 'Failed to fetch balances');
+        }
         if (data?.eth) setEthBalance(data.eth);
         if (data?.usdc) setUsdcBalance(data.usdc);
         if (data?.address) setEvmAddress(data.address);

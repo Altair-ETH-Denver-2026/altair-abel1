@@ -56,7 +56,6 @@ export async function POST(req: Request) {
       chain: sepolia,
       transport: http(
         process.env.ETH_SEPOLIA_RPC_URL
-        ?? process.env.BASE_SEPOLIA_RPC_URL
         ?? 'https://ethereum-sepolia-rpc.publicnode.com'
       ),
     });
@@ -65,7 +64,7 @@ export async function POST(req: Request) {
     const eth = formatEther(ethBalanceRaw);
     let usdc = '0';
 
-    const usdcAddress = process.env.USDC_CONTRACT_SEPOLIA ?? process.env.USDC_CONTRACT_BASE_SEPOLIA;
+    const usdcAddress = process.env.USDC_CONTRACT_SEPOLIA;
     if (usdcAddress) {
       try {
         const [decimals, usdcBalanceRaw] = await Promise.all([

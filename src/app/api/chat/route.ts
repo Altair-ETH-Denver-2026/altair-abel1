@@ -30,6 +30,7 @@ type SwapIntent = {
   sell: string;
   buy: string;
 };
+const pendingSwapBySession = new Map<string, SwapIntent>();
 
 function extractSwapIntentFromMessage(message: string): SwapIntent | null {
   const match = message.match(
@@ -71,6 +72,10 @@ function sanitizeAssistantReply(text: string): string {
   return text.replace(/```[\s\S]*?```/g, '').trim();
 }
 
+function isSwapConfirmationMessage(message: string): boolean {
+  return /\b(yes|confirm|proceed|go ahead|do it|execute|run swap)\b/i.test(message);
+}
+
 export async function POST(req: Request) {
   try {
     const { message, history, accessToken } = await req.json();
@@ -94,10 +99,12 @@ export async function POST(req: Request) {
 
     const aiResponse = response.choices[0].message.content || '';
 
-    let executionNote: string | null = null;
+    const executionNote: string | null = null;
     let swapRecord: Record<string, unknown> | null = null;
     let zgTxHash: string | null = null;
     let zgError: string | null = null;
+    let forcedResponse: string | null = null;
+    const sessionKey = accessToken ?? 'anonymous';
 
     const getActions = async (): Promise<ActionLike[]> => {
       if (!accessToken) return [];
@@ -113,18 +120,24 @@ export async function POST(req: Request) {
 
     const findAction = (actions: ActionLike[], name: string): ActionLike | undefined =>
       actions.find((a) => a.name === name);
+    const findQuoteAction = (actions: ActionLike[]): ActionLike | undefined =>
+      findAction(actions, 'uniswap_get_quote')
+      ?? actions.find((a) => a.name?.toLowerCase().includes('quote'));
+    const findSwapAction = (actions: ActionLike[]): ActionLike | undefined =>
+      findAction(actions, 'uniswap_swap')
+      ?? actions.find((a) => a.name?.toLowerCase().includes('swap'));
 
     const findStorageSaveAction = (actions: ActionLike[]): ActionLike | undefined =>
       findAction(actions, 'zg_storage_save_memory')
       ?? actions.find((a) => a.name?.toLowerCase().includes('save_memory'))
       ?? actions.find((a) => a.name?.toLowerCase().includes('zg_storage'));
 
-    // Attempt to execute swap intent based on user message.
+    // Step 1: quote when swap intent appears.
     const swapIntent = extractSwapIntentFromMessage(message);
     if (swapIntent) {
       try {
         if (!accessToken) {
-          executionNote = 'Swap intent detected, but user is not authenticated. Please connect/sign in first.';
+          forcedResponse = 'I can prepare that swap, but please connect/sign in first so I can quote and execute it.';
         } else {
           const actions = await getActions();
           const { amount, sell, buy } = swapIntent;
@@ -135,34 +148,88 @@ export async function POST(req: Request) {
             throw new Error(`Unsupported token symbol pair: ${sell} -> ${buy}`);
           }
 
-          const uniswapSwapAction = findAction(actions, 'uniswap_swap');
-          if (!uniswapSwapAction) {
-            throw new Error('uniswap_swap action not registered');
+          const uniswapQuoteAction = findQuoteAction(actions);
+          if (!uniswapQuoteAction) {
+            const available = actions.map((a) => a.name ?? '(unnamed)').join(', ');
+            throw new Error(`uniswap_get_quote action not registered. Available actions: ${available}`);
           }
 
-          const result = await uniswapSwapAction.invoke({
+          const quoteResult = await uniswapQuoteAction.invoke({
             tokenIn,
             tokenOut,
             amount: toSmallestUnit(amount, sell),
             slippageTolerance: 0.5,
           });
+          const quoteObj = toObject(quoteResult);
+          const amountOut =
+            quoteObj?.amountOut
+            ?? quoteObj?.quoteAmountOut
+            ?? quoteObj?.expectedAmountOut
+            ?? 'unknown';
+          pendingSwapBySession.set(sessionKey, { amount, sell, buy });
+
+          forcedResponse =
+            `Estimated quote for swapping ${amount} ${sell} -> ${buy} on Ethereum Sepolia is ` +
+            `${amountOut} ${buy} (subject to slippage/market movement). ` +
+            `Reply "confirm swap" to proceed.`;
+        }
+      } catch (intentErr) {
+        console.warn('Swap quote flow failed:', intentErr);
+        forcedResponse =
+          intentErr instanceof Error
+            ? `I could not fetch a swap quote right now: ${intentErr.message}`
+            : 'I could not fetch a swap quote right now.';
+      }
+    }
+
+    // Step 2: execute pending swap on explicit confirmation.
+    if (!swapIntent && isSwapConfirmationMessage(message) && accessToken) {
+      const pending = pendingSwapBySession.get(sessionKey);
+      if (pending) {
+        try {
+          const actions = await getActions();
+          const tokenIn = tokenAddressFromSymbol(pending.sell);
+          const tokenOut = tokenAddressFromSymbol(pending.buy);
+          if (!tokenIn || !tokenOut) {
+            throw new Error(`Unsupported token symbol pair: ${pending.sell} -> ${pending.buy}`);
+          }
+
+          const uniswapSwapAction = findSwapAction(actions);
+          if (!uniswapSwapAction) {
+            const available = actions.map((a) => a.name ?? '(unnamed)').join(', ');
+            throw new Error(`uniswap_swap action not registered. Available actions: ${available}`);
+          }
+
+          const result = await uniswapSwapAction.invoke({
+            tokenIn,
+            tokenOut,
+            amount: toSmallestUnit(pending.amount, pending.sell),
+            slippageTolerance: 0.5,
+          });
+          pendingSwapBySession.delete(sessionKey);
 
           swapRecord = {
-            sell,
-            buy,
-            amount,
+            sell: pending.sell,
+            buy: pending.buy,
+            amount: pending.amount,
             tokenIn,
             tokenOut,
             result,
             createdAt: new Date().toISOString(),
           };
           const swapTx = extractTxHash(result);
-          executionNote = swapTx
-            ? `Swap submitted on Ethereum Sepolia for ${amount} ${sell} -> ${buy}. Tx: ${swapTx}`
-            : `Swap submitted on Ethereum Sepolia for ${amount} ${sell} -> ${buy}.`;
+          forcedResponse = swapTx
+            ? `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}. Tx: ${swapTx}`
+            : `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}.`;
+        } catch (swapErr) {
+          console.warn('Swap execution failed:', swapErr);
+          forcedResponse =
+            swapErr instanceof Error
+              ? `I could not execute the swap: ${swapErr.message}`
+              : 'I could not execute the swap right now.';
         }
-      } catch (intentErr) {
-        console.warn('Swap intent parse/exec skipped:', intentErr);
+      } else {
+        forcedResponse = 'I do not have a pending quote to execute. Ask me for a fresh swap quote first.';
       }
     }
 
@@ -180,7 +247,7 @@ export async function POST(req: Request) {
           key: 'chat_summary_latest',
           value: JSON.stringify({
             userMessage: message,
-            aiResponse,
+            aiResponse: forcedResponse ?? aiResponse,
             hadSwapExecution: Boolean(swapRecord),
             updatedAt: new Date().toISOString(),
           }),
@@ -203,7 +270,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const cleanedReply = sanitizeAssistantReply(aiResponse);
+    const cleanedReply = sanitizeAssistantReply(forcedResponse ?? aiResponse);
     return NextResponse.json({
       content: executionNote ? `${executionNote}\n\n${cleanedReply}` : cleanedReply,
       zgHash: zgTxHash,

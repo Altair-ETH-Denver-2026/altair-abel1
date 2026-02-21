@@ -338,8 +338,10 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
     }
   }
 
-  supportsNetwork = (network: Network): boolean =>
-    network.chainId === String(ETH_SEPOLIA_CHAIN_ID) || network.networkId === 'ethereum-sepolia';
+  supportsNetwork = (_network: Network): boolean => {
+    void _network;
+    return true;
+  };
 }
 
 export const uniswapActionProvider = () => new UniswapActionProvider();

@@ -23,14 +23,18 @@ const USDC_ABI = [
 
 export async function POST(req: Request) {
   try {
-    const { walletAddress: overrideAddress } = await req.json().catch(() => ({ walletAddress: undefined }));
+    const { walletAddress: overrideAddress, accessToken } = await req
+      .json()
+      .catch(() => ({ walletAddress: undefined, accessToken: undefined }));
 
-    // Prefer signed Privy token from cookie; fallback to override only
+    // Prefer explicit access token from the request body (current user session),
+    // then fallback to cookie token for compatibility.
     const cookieStore = await cookies();
     const cookieToken = cookieStore.get('privy-token')?.value;
+    const tokenToVerify = accessToken ?? cookieToken;
 
     const addressToQuery = (overrideAddress
-      ?? (cookieToken ? await getPrivyEvmWalletAddress(cookieToken) : null)) as `0x${string}` | null;
+      ?? (tokenToVerify ? await getPrivyEvmWalletAddress(tokenToVerify) : null)) as `0x${string}` | null;
 
     if (!addressToQuery) {
       return NextResponse.json({ error: 'Unable to resolve wallet address' }, { status: 401 });

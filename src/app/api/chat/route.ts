@@ -46,6 +46,21 @@ type SwapIntent = {
 };
 const pendingSwapBySession = new Map<string, SwapIntent>();
 
+function sessionKeyFromAccessToken(accessToken?: string | null): string {
+  if (!accessToken) return 'anonymous';
+  const parts = accessToken.split('.');
+  if (parts.length < 2) return accessToken;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as {
+      sub?: string;
+      sid?: string;
+    };
+    return payload.sub ?? payload.sid ?? accessToken;
+  } catch {
+    return accessToken;
+  }
+}
+
 function extractSwapIntentFromMessage(message: string): SwapIntent | null {
   const match = message.match(
     /\bswap\s+([0-9]*\.?[0-9]+)\s*([a-zA-Z]+)\s+(?:for|to|into)\s+([a-zA-Z]+)/i
@@ -108,7 +123,23 @@ function extractSwapStatus(value: unknown): string | null {
 }
 
 function isSwapConfirmationMessage(message: string): boolean {
-  return /\b(yes|confirm|proceed|go ahead|do it|execute|run swap)\b/i.test(message);
+  return /\b(yes|confirm|proceed|go ahead|do it|execute|run swap|swap now|use my connected privy wallet)\b/i.test(
+    message
+  );
+}
+
+function extractActionErrorText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (
+    /^swap failed:/i.test(text) ||
+    /^swap simulation failed:/i.test(text) ||
+    /^error /i.test(text) ||
+    /^failed to /i.test(text)
+  ) {
+    return text;
+  }
+  return null;
 }
 
 export async function POST(req: Request) {
@@ -139,7 +170,7 @@ export async function POST(req: Request) {
     let zgTxHash: string | null = null;
     let zgError: string | null = null;
     let forcedResponse: string | null = null;
-    const sessionKey = accessToken ?? 'anonymous';
+    const sessionKey = sessionKeyFromAccessToken(accessToken);
 
     const getActions = async (): Promise<ActionLike[]> => {
       if (!accessToken) return [];
@@ -238,7 +269,10 @@ export async function POST(req: Request) {
             amount: toSmallestUnit(pending.amount, pending.sell),
             slippageTolerance: 0.5,
           });
-          pendingSwapBySession.delete(sessionKey);
+          const actionError = extractActionErrorText(result);
+          if (actionError) {
+            throw new Error(actionError);
+          }
 
           swapRecord = {
             sell: pending.sell,
@@ -252,17 +286,21 @@ export async function POST(req: Request) {
           const swapStatus = extractSwapStatus(result);
           const swapTx = extractTxHash(result);
           if (swapStatus === 'order_submitted') {
+            pendingSwapBySession.delete(sessionKey);
             forcedResponse =
               `Order submitted for ${pending.amount} ${pending.sell} -> ${pending.buy} on Ethereum Sepolia. ` +
               'This path is off-chain first and may fill later.';
           } else if (swapTx) {
+            pendingSwapBySession.delete(sessionKey);
             forcedResponse =
               `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}. ` +
               `Tx: ${swapTx}`;
           } else {
-            forcedResponse =
-              `Swap requested for ${pending.amount} ${pending.sell} -> ${pending.buy}, ` +
-              'but no transaction hash was returned. I did not confirm on-chain execution.';
+            throw new Error(
+              `Swap action returned no transaction hash. Raw result: ${
+                typeof result === 'string' ? result : JSON.stringify(result)
+              }`
+            );
           }
         } catch (swapErr) {
           console.warn('Swap execution failed:', swapErr);

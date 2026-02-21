@@ -208,22 +208,30 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
 
       if (approvalResponse.cancel) {
         const cancelTx = approvalResponse.cancel;
-        await walletProvider.sendTransaction({
+        const cancelHash = await walletProvider.sendTransaction({
           to: cancelTx.to as `0x${string}`,
           data: cancelTx.data as `0x${string}`,
           value: BigInt(cancelTx.value || '0'),
         });
-        await new Promise((r) => setTimeout(r, 5_000));
+        if (cancelHash) {
+          await walletProvider.waitForTransactionReceipt(cancelHash);
+        } else {
+          throw new Error('Cancel transaction did not return a hash from wallet provider');
+        }
       }
 
       if (approvalResponse.approval) {
         const approvalTx = approvalResponse.approval;
-        await walletProvider.sendTransaction({
+        const approvalHash = await walletProvider.sendTransaction({
           to: approvalTx.to as `0x${string}`,
           data: approvalTx.data as `0x${string}`,
           value: BigInt(approvalTx.value || '0'),
         });
-        await new Promise((r) => setTimeout(r, 8_000));
+        if (approvalHash) {
+          await walletProvider.waitForTransactionReceipt(approvalHash);
+        } else {
+          throw new Error('Approval transaction did not return a hash from wallet provider');
+        }
       }
 
       const quoteResponse = await this.api<QuoteResponse>('/quote', {
@@ -303,6 +311,9 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
             maxPriorityFeePerGas: BigInt(swapResponse.swap.maxPriorityFeePerGas),
           }),
         });
+        if (!txHash) {
+          throw new Error('Swap transaction did not return a hash from wallet provider');
+        }
         const receipt = await walletProvider.waitForTransactionReceipt(txHash);
         if (!receipt || (typeof receipt.status === 'string' && receipt.status !== 'success')
           || (typeof receipt.status === 'number' && receipt.status !== 1)) {

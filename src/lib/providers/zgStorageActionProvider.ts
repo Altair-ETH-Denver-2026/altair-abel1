@@ -8,6 +8,8 @@ import {
 import { z } from 'zod';
 import { ethers } from 'ethers';
 import { Indexer, ZgFile, Batcher, KvClient, getFlowContract } from '@0glabs/0g-ts-sdk';
+import { promises as fs } from 'fs';
+import path from 'path';
 
 const ZG_RPC_URL = process.env.ZG_RPC_URL || 'https://evmrpc-testnet.0g.ai';
 const ZG_PRIVATE_KEY = process.env.ZG_PRIVATE_KEY!;
@@ -25,6 +27,9 @@ const ZG_KV_RPC_FALLBACKS = (process.env.ZG_KV_RPC_FALLBACKS ?? '')
   .map((s) => s.trim())
   .filter(Boolean);
 const ZG_KV_TIMEOUT_MS = Number(process.env.ZG_KV_TIMEOUT_MS ?? 5000);
+const ZG_ENABLE_LOCAL_FALLBACK = (process.env.ZG_ENABLE_LOCAL_FALLBACK ?? 'true') === 'true';
+const ZG_LOCAL_FALLBACK_PATH =
+  process.env.ZG_LOCAL_FALLBACK_PATH ?? path.join(process.cwd(), '.cache', 'zg-memory-fallback.json');
 
 const ZgSaveMemorySchema = z.object({
   key: z.string().describe('Memory key, e.g. preferences or risk_tolerance.'),
@@ -63,6 +68,39 @@ function userKey(address: string, key: string): Uint8Array {
 
 function kbIndexKey(label: string): Uint8Array {
   return Uint8Array.from(Buffer.from(`kb:${label}`, 'utf-8'));
+}
+
+function localFallbackMemoryKey(address: string, key: string): string {
+  return `user:${address.toLowerCase()}:${key}`;
+}
+
+async function loadLocalFallbackStore(): Promise<Record<string, string>> {
+  try {
+    const raw = await fs.readFile(ZG_LOCAL_FALLBACK_PATH, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null) {
+      return parsed as Record<string, string>;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeLocalFallbackValue(
+  address: string,
+  key: string,
+  value: string
+): Promise<void> {
+  const store = await loadLocalFallbackStore();
+  store[localFallbackMemoryKey(address, key)] = value;
+  await fs.mkdir(path.dirname(ZG_LOCAL_FALLBACK_PATH), { recursive: true });
+  await fs.writeFile(ZG_LOCAL_FALLBACK_PATH, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+async function readLocalFallbackValue(address: string, key: string): Promise<string | null> {
+  const store = await loadLocalFallbackStore();
+  return store[localFallbackMemoryKey(address, key)] ?? null;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -112,8 +150,8 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     walletProvider: EvmWalletProvider,
     args: z.infer<typeof ZgSaveMemorySchema>
   ): Promise<string> {
+    const address = args.userAddress || (await walletProvider.getAddress());
     try {
-      const address = args.userAddress || (await walletProvider.getAddress());
       const indexer = new Indexer(ZG_INDEXER_RPC);
       const signer = getEthersSigner();
       const flow = getFlowContract(ZG_FLOW_CONTRACT, signer as any);
@@ -143,6 +181,21 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
         2
       );
     } catch (err: any) {
+      if (ZG_ENABLE_LOCAL_FALLBACK) {
+        await writeLocalFallbackValue(address, args.key, args.value);
+        return JSON.stringify(
+          {
+            status: 'memory_saved_fallback',
+            backend: 'local_file',
+            key: args.key,
+            namespace: address.toLowerCase(),
+            fallbackPath: ZG_LOCAL_FALLBACK_PATH,
+            warning: `0G write failed: ${err.message}`,
+          },
+          null,
+          2
+        );
+      }
       return `Error saving memory: ${err.message}`;
     }
   }
@@ -156,8 +209,8 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     walletProvider: EvmWalletProvider,
     args: z.infer<typeof ZgGetMemorySchema>
   ): Promise<string> {
+    const address = args.userAddress || (await walletProvider.getAddress());
     try {
-      const address = args.userAddress || (await walletProvider.getAddress());
       const { value, endpoint } = await readKvValueWithFallback(
         ZG_STREAM_ID,
         userKey(address, args.key)
@@ -186,6 +239,25 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
         2
       );
     } catch (err: any) {
+      if (ZG_ENABLE_LOCAL_FALLBACK) {
+        const fallbackValue = await readLocalFallbackValue(address, args.key);
+        if (fallbackValue !== null) {
+          return JSON.stringify(
+            {
+              status: 'memory_retrieved',
+              network: ZG_NETWORK,
+              key: args.key,
+              namespace: address.toLowerCase(),
+              backend: 'local_file',
+              fallbackPath: ZG_LOCAL_FALLBACK_PATH,
+              warning: `0G KV read failed: ${err.message}`,
+              value: fallbackValue,
+            },
+            null,
+            2
+          );
+        }
+      }
       if (err.message?.includes('not found') || err.message?.includes('null')) {
         return JSON.stringify({ status: 'not_found', key: args.key });
       }

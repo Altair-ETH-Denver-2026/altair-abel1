@@ -115,6 +115,11 @@ export async function POST(req: Request) {
     const findAction = (actions: ActionLike[], name: string): ActionLike | undefined =>
       actions.find((a) => a.name === name);
 
+    const findStorageSaveAction = (actions: ActionLike[]): ActionLike | undefined =>
+      findAction(actions, 'zg_storage_save_memory')
+      ?? actions.find((a) => a.name?.toLowerCase().includes('save_memory'))
+      ?? actions.find((a) => a.name?.toLowerCase().includes('zg_storage'));
+
     // Attempt to execute swap intent based on user message.
     const swapIntent = extractSwapIntentFromMessage(message);
     if (swapIntent) {
@@ -166,9 +171,10 @@ export async function POST(req: Request) {
     if (accessToken) {
       try {
         const actions = await getActions();
-        const saveMemoryAction = findAction(actions, 'zg_storage_save_memory');
+        const saveMemoryAction = findStorageSaveAction(actions);
         if (!saveMemoryAction) {
-          throw new Error('zg_storage_save_memory action not registered');
+          const available = actions.map((a) => a.name ?? '(unnamed)').join(', ');
+          throw new Error(`zg_storage_save_memory action not registered. Available actions: ${available}`);
         }
 
         const summaryResult = await saveMemoryAction.invoke({

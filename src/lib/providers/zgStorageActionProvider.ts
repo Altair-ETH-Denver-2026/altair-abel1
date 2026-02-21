@@ -164,7 +164,7 @@ function markOnchainWriteFailure(): void {
 
 async function uploadContentTo0g(content: string, namePrefix: string): Promise<{
   rootHash: string;
-  transactionHash: string | null;
+  transactionHash: string;
 }> {
   const signer = getEthersSigner();
   const indexer = new Indexer(ZG_INDEXER_RPC);
@@ -177,14 +177,22 @@ async function uploadContentTo0g(content: string, namePrefix: string): Promise<{
     await fs.unlink(tmpFile).catch(() => undefined);
     throw new Error(`Error computing Merkle tree: ${treeErr}`);
   }
-  const rootHash = tree.rootHash();
+  const computedRootHash = tree.rootHash();
+  if (!computedRootHash) {
+    await file.close();
+    await fs.unlink(tmpFile).catch(() => undefined);
+    throw new Error('Error computing Merkle root hash');
+  }
+  const rootHash: string = computedRootHash;
   const [tx, uploadErr] = await indexer.upload(file, ZG_RPC_URL, signer as any);
   await file.close();
   await fs.unlink(tmpFile).catch(() => undefined);
   if (uploadErr !== null) {
     throw new Error(`Error uploading to 0G Storage: ${uploadErr}`);
   }
-  return { rootHash, transactionHash: extractTxHash(tx) };
+  const txHash = extractTxHash(tx);
+  const transactionHash: string = txHash ? txHash : '';
+  return { rootHash, transactionHash };
 }
 
 async function downloadContentFrom0g(rootHash: string): Promise<string> {

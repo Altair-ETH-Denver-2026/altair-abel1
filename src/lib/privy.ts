@@ -1,4 +1,4 @@
-import { PrivyClient, type LinkedAccountWithMetadata } from '@privy-io/server-auth';
+import { PrivyClient, type AuthorizationContext } from '@privy-io/node';
 
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
@@ -28,67 +28,156 @@ if (PRIVY_WALLET_AUTH_PRIVATE_KEY && !PRIVY_WALLET_AUTH_PRIVATE_KEY.startsWith('
   throw new Error('PRIVY_WALLET_AUTH_PRIVATE_KEY must start with "wallet-auth:"');
 }
 
-const privy = new PrivyClient(PRIVY_APP_ID, PRIVY_APP_SECRET, {
-  walletApi: {
-    authorizationPrivateKey: PRIVY_WALLET_AUTH_PRIVATE_KEY,
-  },
+const privy = new PrivyClient({
+  appId: PRIVY_APP_ID,
+  appSecret: PRIVY_APP_SECRET,
+  jwtVerificationKey: PRIVY_VERIFICATION_KEY,
 });
 
 const normalizeEvmAddress = (addr: string) => (addr.startsWith('0x') ? addr : `0x${addr}`);
+const preferredWalletByUserId = new Map<string, { walletId: string; address: string }>();
 
-type PrivyWalletListItem = {
-  id: string;
-  address: string;
-};
+type AccessClaims = { userId: string };
+type PrivyWalletListItem = { id: string; address: string };
 
-function extractCandidateEvmAddresses(
-  user: Awaited<ReturnType<typeof privy.getUserById>>
-): string[] {
-  const addresses = new Set<string>();
+function getString(obj: unknown, key: string): string | undefined {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const value = (obj as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
 
-  if (user.wallet && ((user.wallet.chainType === 'ethereum') || user.wallet.chainId?.startsWith('eip155'))) {
-    addresses.add(normalizeEvmAddress(user.wallet.address));
+function getNestedString(obj: unknown, keyA: string, keyB: string): string | undefined {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const nested = (obj as Record<string, unknown>)[keyA];
+  return getString(nested, keyB);
+}
+
+async function verifyAccessTokenClaims(accessToken: string): Promise<AccessClaims> {
+  const clientAny = privy as unknown as {
+    verifyAuthToken?: (token: string, verificationKey?: string) => Promise<unknown>;
+    utils?: () => { auth: () => { verifyAccessToken: (params: { access_token: string }) => Promise<unknown> } };
+  };
+
+  if (typeof clientAny.verifyAuthToken === 'function') {
+    const claims = await clientAny.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
+    const userId = getString(claims, 'userId') ?? getString(claims, 'user_id');
+    if (!userId) throw new Error('Unable to resolve userId from Privy auth token');
+    return { userId };
   }
 
-  user.linkedAccounts
-    ?.filter((a: LinkedAccountWithMetadata) => {
-      const w = a as LinkedAccountWithMetadata & { address?: string; chainType?: string; chainId?: string };
-      return w.type === 'wallet' && ((w.chainType === 'ethereum') || w.chainId?.startsWith('eip155')) && !!w.address;
-    })
-    .forEach((w) => {
-      const addr = (w as { address?: string }).address;
-      if (addr) addresses.add(normalizeEvmAddress(addr));
-    });
+  if (typeof clientAny.utils === 'function') {
+    const claims = await clientAny.utils().auth().verifyAccessToken({ access_token: accessToken });
+    const userId = getString(claims, 'userId') ?? getString(claims, 'user_id');
+    if (!userId) throw new Error('Unable to resolve userId from Privy access token');
+    return { userId };
+  }
 
-  return [...addresses];
+  throw new Error('Privy client does not expose access-token verification methods');
+}
+
+async function listUserEthereumWallets(userId: string): Promise<PrivyWalletListItem[]> {
+  const clientAny = privy as unknown as {
+    wallets?: () => {
+      list: (params: { user_id?: string; chain_type?: 'ethereum' | 'solana' }) => AsyncIterable<unknown>;
+    };
+    walletApi?: {
+      getWallets: (params: { chainType: 'ethereum'; cursor?: string }) => Promise<{ data?: unknown[]; nextCursor?: string }>;
+    };
+  };
+
+  if (typeof clientAny.wallets === 'function') {
+    const wallets: PrivyWalletListItem[] = [];
+    for await (const wallet of clientAny.wallets().list({ user_id: userId, chain_type: 'ethereum' })) {
+      const id = getString(wallet, 'id');
+      const address = getString(wallet, 'address');
+      if (id && address) wallets.push({ id, address: normalizeEvmAddress(address) });
+    }
+    return wallets;
+  }
+
+  if (clientAny.walletApi?.getWallets) {
+    const wallets: PrivyWalletListItem[] = [];
+    let nextCursor: string | undefined;
+    do {
+      const page = await clientAny.walletApi.getWallets({ chainType: 'ethereum', cursor: nextCursor });
+      const pageWallets = (page.data ?? [])
+        .map((w) => ({
+          id: getString(w, 'id') ?? '',
+          address: normalizeEvmAddress(getString(w, 'address') ?? ''),
+          ownerId: getString(w, 'owner_id') ?? getString(w, 'ownerId') ?? getNestedString(w, 'owner', 'user_id'),
+        }))
+        .filter((w) => Boolean(w.id) && Boolean(w.address) && w.ownerId === userId)
+        .map((w) => ({ id: w.id, address: w.address }));
+      wallets.push(...pageWallets);
+      nextCursor = page.nextCursor;
+    } while (nextCursor);
+    return wallets;
+  }
+
+  throw new Error('Privy client does not expose wallet listing methods');
+}
+
+async function signMessageWithAuthContext(walletId: string): Promise<void> {
+  const authContext: AuthorizationContext = {
+    authorization_private_keys: PRIVY_WALLET_AUTH_PRIVATE_KEY ? [PRIVY_WALLET_AUTH_PRIVATE_KEY] : [],
+  };
+  const clientAny = privy as unknown as {
+    wallets?: () => {
+      ethereum: () => {
+        signMessage: (
+          walletId: string,
+          params: { message: string; authorization_context?: AuthorizationContext }
+        ) => Promise<unknown>;
+      };
+    };
+    walletApi?: {
+      ethereum?: {
+        signMessage: (params: { walletId: string; message: string }) => Promise<unknown>;
+      };
+    };
+  };
+
+  if (typeof clientAny.wallets === 'function') {
+    await clientAny.wallets().ethereum().signMessage(walletId, {
+      message: 'privy-signability-check',
+      authorization_context: authContext,
+    });
+    return;
+  }
+
+  if (clientAny.walletApi?.ethereum?.signMessage) {
+    await clientAny.walletApi.ethereum.signMessage({
+      walletId,
+      message: 'privy-signability-check',
+    });
+    return;
+  }
+
+  throw new Error('Privy client does not expose ethereum signMessage methods');
 }
 
 async function isWalletSignable(walletId: string): Promise<boolean> {
   try {
-    await privy.walletApi.ethereum.signMessage({
-      walletId,
-      message: 'privy-signability-check',
-    });
+    await signMessageWithAuthContext(walletId);
     return true;
   } catch {
     return false;
   }
 }
 
-async function getAllEthereumWallets(): Promise<PrivyWalletListItem[]> {
-  const wallets: PrivyWalletListItem[] = [];
-  let nextCursor: string | undefined;
-
-  do {
-    const page = await privy.walletApi.getWallets({
-      chainType: 'ethereum',
-      cursor: nextCursor,
-    });
-    wallets.push(...((page.data as PrivyWalletListItem[] | undefined) ?? []));
-    nextCursor = page.nextCursor;
-  } while (nextCursor);
-
-  return wallets;
+async function createUserEthereumWallet(userId: string): Promise<void> {
+  const clientAny = privy as unknown as {
+    wallets?: () => {
+      create: (params: { chain_type: 'ethereum'; owner: { user_id: string } }) => Promise<unknown>;
+    };
+  };
+  if (!clientAny.wallets) {
+    throw new Error('Privy client does not expose wallets.create');
+  }
+  await clientAny.wallets().create({
+    chain_type: 'ethereum',
+    owner: { user_id: userId },
+  });
 }
 
 type MatchedWallet = {
@@ -101,15 +190,8 @@ async function getUserMatchedWallets(accessToken: string): Promise<{
   userId: string;
   matches: MatchedWallet[];
 }> {
-  if (!PRIVY_VERIFICATION_KEY) {
-    throw new Error('Missing PRIVY_VERIFICATION_KEY');
-  }
-
-  const claims = await privy.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
-  const user = await privy.getUserById(claims.userId);
-  const candidateAddresses = extractCandidateEvmAddresses(user);
-  const allWallets = await getAllEthereumWallets();
-  const matched = allWallets.filter((w) => candidateAddresses.includes(normalizeEvmAddress(w.address)));
+  const { userId } = await verifyAccessTokenClaims(accessToken);
+  const matched = await listUserEthereumWallets(userId);
 
   const matches: MatchedWallet[] = [];
   for (const wallet of matched) {
@@ -120,7 +202,7 @@ async function getUserMatchedWallets(accessToken: string): Promise<{
     });
   }
 
-  return { userId: claims.userId, matches };
+  return { userId, matches };
 }
 
 export type PrivySignabilityReport = {
@@ -128,23 +210,58 @@ export type PrivySignabilityReport = {
   userId: string;
   matchedAddress: string | null;
   signableWalletId: string | null;
+  preferredWalletId: string | null;
+  createdNewWallet?: boolean;
   reason?: string;
 };
 
-export async function getPrivySignabilityReport(accessToken: string): Promise<PrivySignabilityReport> {
+type GetPrivySignabilityReportOptions = {
+  ensureSignable?: boolean;
+};
+
+export async function getPrivySignabilityReport(
+  accessToken: string,
+  options?: GetPrivySignabilityReportOptions
+): Promise<PrivySignabilityReport> {
   if (!accessToken) {
     throw new Error('Missing Privy access token');
   }
 
-  const { userId, matches } = await getUserMatchedWallets(accessToken);
+  let { userId, matches } = await getUserMatchedWallets(accessToken);
+  let createdNewWallet = false;
+  if (options?.ensureSignable && !matches.some((m) => m.signable)) {
+    await createUserEthereumWallet(userId);
+    const refreshed = await getUserMatchedWallets(accessToken);
+    userId = refreshed.userId;
+    matches = refreshed.matches;
+    createdNewWallet = true;
+  }
+
+  const preferred = preferredWalletByUserId.get(userId);
+  const preferredSignable = preferred
+    ? matches.find((m) => m.walletId === preferred.walletId && m.signable)
+    : undefined;
+  if (preferredSignable) {
+    return {
+      ok: true,
+      userId,
+      matchedAddress: preferredSignable.address,
+      signableWalletId: preferredSignable.walletId,
+      preferredWalletId: preferredSignable.walletId,
+      createdNewWallet,
+    };
+  }
 
   for (const match of matches) {
     if (match.signable) {
+      preferredWalletByUserId.set(userId, { walletId: match.walletId, address: match.address });
       return {
         ok: true,
         userId,
         matchedAddress: match.address,
         signableWalletId: match.walletId,
+        preferredWalletId: match.walletId,
+        createdNewWallet,
       };
     }
   }
@@ -154,6 +271,8 @@ export async function getPrivySignabilityReport(accessToken: string): Promise<Pr
     userId,
     matchedAddress: matches[0]?.address ?? null,
     signableWalletId: null,
+    preferredWalletId: null,
+    createdNewWallet,
     reason:
       matches.length > 0
         ? 'Matched wallet exists but is not signable with current wallet auth key for this app.'
@@ -165,41 +284,11 @@ export async function getPrivyEvmWalletAddress(accessToken: string): Promise<str
   if (!accessToken) {
     throw new Error('Missing Privy access token');
   }
-
-  const claims = await privy.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
-  console.log('[Privy] Token verified. userId:', claims.userId);
-
-  const user = await privy.getUserById(claims.userId);
-  console.log('[Privy] Fetched user. linkedAccounts:', user.linkedAccounts?.length ?? 0);
-  console.log('[Privy] All linked account types:', user.linkedAccounts?.map((a) => a.type));
-
-  const candidateAddresses = extractCandidateEvmAddresses(user);
-  const evmAddress = candidateAddresses[0];
-
-  if (evmAddress) {
-    const normalized = normalizeEvmAddress(evmAddress);
-    console.log('[Privy] Found EVM wallet:', normalized);
-    return normalized;
-  }
-
-  // Fetch app wallets and only accept a strict address match from this user.
-  try {
-    const wallets = await getAllEthereumWallets();
-
-    console.log('[Privy] walletApi wallets for user:', wallets?.map((w) => ({ id: w.id, address: w.address })));
-
-    const wallet = wallets?.find((w) => candidateAddresses.includes(normalizeEvmAddress(w.address)));
-    if (wallet?.address) {
-      console.log('[Privy] Found via walletApi:', wallet.address);
-      return wallet.address;
-    }
-  } catch (e) {
-    console.warn('[Privy] walletApi.getWallets failed:', e);
-  }
+  const { userId, matches } = await getUserMatchedWallets(accessToken);
+  if (matches[0]) return matches[0].address;
 
   throw new Error(
-    `No Privy EVM wallet found for user ${claims.userId}. ` +
-    `Linked account types: ${user.linkedAccounts?.map((a) => a.type).join(', ')}.`
+    `No Privy EVM wallet found for user ${userId}.`
   );
 }
 
@@ -207,6 +296,7 @@ type EnsurePrivyEmbeddedEvmWalletOptions = {
   requireSignable?: boolean;
   requestedWalletAddress?: string;
   requestedWalletId?: string;
+  ensureSignable?: boolean;
 };
 
 export async function ensurePrivyEmbeddedEvmWallet(
@@ -221,7 +311,9 @@ export async function ensurePrivyEmbeddedEvmWallet(
     throw new Error('Missing PRIVY_WALLET_AUTH_PRIVATE_KEY for server-side wallet control');
   }
 
-  const { userId, matches } = await getUserMatchedWallets(accessToken);
+  const signability = await getPrivySignabilityReport(accessToken, { ensureSignable: options?.ensureSignable });
+  const { userId } = signability;
+  const { matches } = await getUserMatchedWallets(accessToken);
   console.log('[Privy] ensure embedded wallet. userId:', userId, 'matched wallets:', matches.length);
   const requireSignable = options?.requireSignable ?? true;
   const requestedWalletAddress = options?.requestedWalletAddress
@@ -262,8 +354,12 @@ export async function ensurePrivyEmbeddedEvmWallet(
     );
   }
 
-  const signable = matches.find((m) => m.signable);
+  const preferred = preferredWalletByUserId.get(userId);
+  const signable = (preferred
+    ? matches.find((m) => m.signable && m.walletId === preferred.walletId)
+    : undefined) ?? matches.find((m) => m.signable);
   if (signable) {
+    preferredWalletByUserId.set(userId, { walletId: signable.walletId, address: signable.address });
     return { walletId: signable.walletId, address: signable.address };
   }
   const fallback = matches[0];

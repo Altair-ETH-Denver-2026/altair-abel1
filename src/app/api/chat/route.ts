@@ -403,13 +403,8 @@ export async function POST(req: Request) {
         });
         zgTxHash = extractTxHash(summaryResult) ?? zgTxHash;
 
-        if (swapRecord) {
-          const tradeResult = await saveMemoryAction.invoke({
-            key: `trade_${Date.now()}`,
-            value: JSON.stringify(swapRecord),
-          });
-          zgTxHash = extractTxHash(tradeResult) ?? zgTxHash;
-        }
+        // Temporarily disable per-trade memory writes to reduce 0G write attempts.
+        // Swap context is still reflected in chat_summary_latest via hadSwapExecution.
       } catch (storageErr) {
         zgError =
           storageErr instanceof Error

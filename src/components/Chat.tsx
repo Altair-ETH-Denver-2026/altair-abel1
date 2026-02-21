@@ -13,11 +13,17 @@ interface Message {
   zgError?: string | null;
 }
 
+type PreferredWallet = {
+  walletId?: string;
+  address?: string;
+};
+
 export default function Chat() {
   const { getAccessToken } = usePrivy();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [preferredWallet, setPreferredWallet] = useState<PreferredWallet | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom
@@ -26,6 +32,33 @@ export default function Chat() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Preflight wallet signability soon after login/session restore.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const accessToken =
+          (typeof getAccessToken === 'function' ? await getAccessToken() : null)
+          ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
+        if (!accessToken) return;
+        const preflight = await fetch('/api/privy/ensure-signable-wallet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accessToken }),
+        });
+        const preflightData = await preflight.json();
+        if (!cancelled && preflightData?.ok && preflightData?.selectedWallet) {
+          setPreferredWallet(preflightData.selectedWallet as PreferredWallet);
+        }
+      } catch (preflightErr) {
+        console.warn('Privy onboarding preflight failed:', preflightErr);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getAccessToken]);
 
   const handleSendMessage = async () => {
     if (!input.trim() || isLoading) return;
@@ -39,6 +72,30 @@ export default function Chat() {
       const accessToken =
         (typeof getAccessToken === 'function' ? await getAccessToken() : null)
         ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
+
+      // Before first swap, attempt to auto-heal by ensuring a signable server wallet.
+      const isSwapLikeMessage = /\b(swap|confirm swap|execute swap|swap now)\b/i.test(userMessage);
+      let requestedWalletId = preferredWallet?.walletId;
+      let requestedWalletAddress = preferredWallet?.address;
+      if (accessToken && isSwapLikeMessage) {
+        try {
+          const preflight = await fetch('/api/privy/ensure-signable-wallet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accessToken }),
+          });
+          const preflightData = await preflight.json();
+          if (preflightData?.ok && preflightData?.selectedWallet) {
+            const selected = preflightData.selectedWallet as PreferredWallet;
+            requestedWalletId = selected.walletId;
+            requestedWalletAddress = selected.address;
+            setPreferredWallet(selected);
+          }
+        } catch (preflightErr) {
+          console.warn('Privy signable wallet preflight failed:', preflightErr);
+        }
+      }
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -46,6 +103,8 @@ export default function Chat() {
           message: userMessage,
           history: messages.map(m => ({ role: m.role, content: m.content })),
           accessToken,
+          requestedWalletId,
+          requestedWalletAddress,
         }),
       });
 

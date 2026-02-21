@@ -26,6 +26,7 @@ type StorageMode = 'onchain_0g' | 'hybrid' | 'local_only';
 const ZG_STORAGE_MODE = (process.env.ZG_STORAGE_MODE ?? 'hybrid') as StorageMode;
 const ZG_CIRCUIT_BREAKER_THRESHOLD = Number(process.env.ZG_CIRCUIT_BREAKER_THRESHOLD ?? 3);
 const ZG_CIRCUIT_BREAKER_COOLDOWN_MS = Number(process.env.ZG_CIRCUIT_BREAKER_COOLDOWN_MS ?? 300000);
+const ZG_MIN_BALANCE_WEI = BigInt(process.env.ZG_MIN_BALANCE_WEI ?? '30000000000000000'); // 0.03 0G
 
 const writeCircuitState: { consecutiveFailures: number; openUntil: number } = {
   consecutiveFailures: 0,
@@ -167,6 +168,17 @@ async function uploadContentTo0g(content: string, namePrefix: string): Promise<{
   transactionHash: string;
 }> {
   const signer = getEthersSigner();
+  const provider = signer.provider ?? new ethers.JsonRpcProvider(ZG_RPC_URL);
+  const signerAddress = await signer.getAddress();
+  const signerBalanceWei = await provider.getBalance(signerAddress);
+  if (signerBalanceWei < ZG_MIN_BALANCE_WEI) {
+    throw new Error(
+      `Insufficient 0G signer balance for upload. ` +
+      `Current=${ethers.formatEther(signerBalanceWei)} 0G, ` +
+      `required_min=${ethers.formatEther(ZG_MIN_BALANCE_WEI)} 0G. ` +
+      `Top up signer wallet ${signerAddress} on ${ZG_RPC_URL}.`
+    );
+  }
   const indexer = new Indexer(ZG_INDEXER_RPC);
   const tmpFile = path.join(os.tmpdir(), `${namePrefix}-${Date.now()}.json`);
   await fs.writeFile(tmpFile, content, 'utf-8');

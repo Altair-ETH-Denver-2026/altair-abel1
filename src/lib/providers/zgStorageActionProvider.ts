@@ -7,29 +7,21 @@ import {
 } from '@coinbase/agentkit';
 import { z } from 'zod';
 import { ethers } from 'ethers';
-import { Indexer, ZgFile, Batcher, KvClient, getFlowContract } from '@0glabs/0g-ts-sdk';
+import { Indexer, ZgFile } from '@0glabs/0g-ts-sdk';
 import { promises as fs } from 'fs';
 import path from 'path';
+import os from 'os';
 
 const ZG_RPC_URL = process.env.ZG_RPC_URL || 'https://evmrpc-testnet.0g.ai';
 const ZG_PRIVATE_KEY = process.env.ZG_PRIVATE_KEY!;
 const ZG_INDEXER_RPC =
-  process.env.ZG_INDEXER_RPC || 'https://indexer-storage-testnet-standard.0g.ai';
-const ZG_KV_RPC = process.env.ZG_KV_RPC || 'http://3.101.147.150:6789';
-const ZG_FLOW_CONTRACT =
-  process.env.ZG_FLOW_CONTRACT || '0x22E03a6A89B950F1c82ec5e74F8eCa321a105296';
-const ZG_STREAM_ID =
-  process.env.ZG_STREAM_ID ||
-  '0x0000000000000000000000000000000000000000000000000000000000000000';
+  process.env.ZG_INDEXER_RPC || 'https://indexer-storage-testnet-turbo.0g.ai';
 const ZG_NETWORK = process.env.ZG_NETWORK || 'testnet';
-const ZG_KV_RPC_FALLBACKS = (process.env.ZG_KV_RPC_FALLBACKS ?? '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
-const ZG_KV_TIMEOUT_MS = Number(process.env.ZG_KV_TIMEOUT_MS ?? 5000);
 const ZG_ENABLE_LOCAL_FALLBACK = (process.env.ZG_ENABLE_LOCAL_FALLBACK ?? 'true') === 'true';
 const ZG_LOCAL_FALLBACK_PATH =
   process.env.ZG_LOCAL_FALLBACK_PATH ?? path.join(process.cwd(), '.cache', 'zg-memory-fallback.json');
+const ZG_LOCAL_INDEX_PATH =
+  process.env.ZG_LOCAL_INDEX_PATH ?? path.join(process.cwd(), '.cache', 'zg-storage-index.json');
 
 const ZgSaveMemorySchema = z.object({
   key: z.string().describe('Memory key, e.g. preferences or risk_tolerance.'),
@@ -59,15 +51,6 @@ function getEthersSigner(): ethers.Wallet {
   }
   const provider = new ethers.JsonRpcProvider(ZG_RPC_URL);
   return new ethers.Wallet(ZG_PRIVATE_KEY, provider);
-}
-
-function userKey(address: string, key: string): Uint8Array {
-  const fullKey = `user:${address.toLowerCase()}:${key}`;
-  return Uint8Array.from(Buffer.from(fullKey, 'utf-8'));
-}
-
-function kbIndexKey(label: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(`kb:${label}`, 'utf-8'));
 }
 
 function localFallbackMemoryKey(address: string, key: string): string {
@@ -103,37 +86,82 @@ async function readLocalFallbackValue(address: string, key: string): Promise<str
   return store[localFallbackMemoryKey(address, key)] ?? null;
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return await Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs)
-    ),
-  ]);
+type StorageIndex = {
+  memory: Record<string, { rootHash: string; transactionHash: string | null; updatedAt: string }>;
+  knowledge: Record<string, { rootHash: string; transactionHash: string | null; updatedAt: string }>;
+};
+
+function emptyIndex(): StorageIndex {
+  return { memory: {}, knowledge: {} };
 }
 
-async function readKvValueWithFallback(
-  streamId: string,
-  key: Uint8Array
-): Promise<{ value: Awaited<ReturnType<KvClient['getValue']>>; endpoint: string }> {
-  const endpoints = [ZG_KV_RPC, ...ZG_KV_RPC_FALLBACKS];
-  let lastErr: unknown = null;
-
-  for (const endpoint of endpoints) {
-    try {
-      const kvClient = new KvClient(endpoint);
-      const value = await withTimeout(kvClient.getValue(streamId, key), ZG_KV_TIMEOUT_MS);
-      return { value, endpoint };
-    } catch (err) {
-      lastErr = err;
+async function loadIndex(): Promise<StorageIndex> {
+  try {
+    const raw = await fs.readFile(ZG_LOCAL_INDEX_PATH, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof parsed.memory === 'object' &&
+      typeof parsed.knowledge === 'object'
+    ) {
+      return parsed as StorageIndex;
     }
+    return emptyIndex();
+  } catch {
+    return emptyIndex();
   }
+}
 
-  throw new Error(
-    `All KV endpoints failed (${endpoints.join(', ')}): ${
-      lastErr instanceof Error ? lastErr.message : String(lastErr)
-    }`
-  );
+async function saveIndex(index: StorageIndex): Promise<void> {
+  await fs.mkdir(path.dirname(ZG_LOCAL_INDEX_PATH), { recursive: true });
+  await fs.writeFile(ZG_LOCAL_INDEX_PATH, JSON.stringify(index, null, 2), 'utf-8');
+}
+
+function extractTxHash(tx: unknown): string | null {
+  if (typeof tx === 'string') return tx;
+  if (typeof tx === 'object' && tx !== null) {
+    const maybe = tx as { txHash?: string; transactionHash?: string };
+    return maybe.txHash ?? maybe.transactionHash ?? null;
+  }
+  return null;
+}
+
+async function uploadContentTo0g(content: string, namePrefix: string): Promise<{
+  rootHash: string;
+  transactionHash: string | null;
+}> {
+  const signer = getEthersSigner();
+  const indexer = new Indexer(ZG_INDEXER_RPC);
+  const tmpFile = path.join(os.tmpdir(), `${namePrefix}-${Date.now()}.json`);
+  await fs.writeFile(tmpFile, content, 'utf-8');
+  const file = await ZgFile.fromFilePath(tmpFile);
+  const [tree, treeErr] = await file.merkleTree();
+  if (treeErr !== null || !tree) {
+    await file.close();
+    await fs.unlink(tmpFile).catch(() => undefined);
+    throw new Error(`Error computing Merkle tree: ${treeErr}`);
+  }
+  const rootHash = tree.rootHash();
+  const [tx, uploadErr] = await indexer.upload(file, ZG_RPC_URL, signer as any);
+  await file.close();
+  await fs.unlink(tmpFile).catch(() => undefined);
+  if (uploadErr !== null) {
+    throw new Error(`Error uploading to 0G Storage: ${uploadErr}`);
+  }
+  return { rootHash, transactionHash: extractTxHash(tx) };
+}
+
+async function downloadContentFrom0g(rootHash: string): Promise<string> {
+  const indexer = new Indexer(ZG_INDEXER_RPC);
+  const outputPath = path.join(os.tmpdir(), `0g-read-${Date.now()}.json`);
+  const downloadErr = await indexer.download(rootHash, outputPath, true);
+  if (downloadErr !== null) {
+    throw new Error(`Error downloading from 0G Storage: ${downloadErr}`);
+  }
+  const content = await fs.readFile(outputPath, 'utf-8');
+  await fs.unlink(outputPath).catch(() => undefined);
+  return content;
 }
 
 class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
@@ -143,7 +171,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
 
   @CreateAction({
     name: 'zg_storage_save_memory',
-    description: 'Save user-scoped memory to 0G KV storage.',
+    description: 'Save user-scoped memory to 0G file storage (no KV dependency).',
     schema: ZgSaveMemorySchema,
   })
   async saveMemory(
@@ -152,20 +180,28 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
   ): Promise<string> {
     const address = args.userAddress || (await walletProvider.getAddress());
     try {
-      const indexer = new Indexer(ZG_INDEXER_RPC);
-      const signer = getEthersSigner();
-      const flow = getFlowContract(ZG_FLOW_CONTRACT, signer as any);
-
-      const [nodes, nodeErr] = await indexer.selectNodes(1);
-      if (nodeErr !== null) return `Error selecting storage nodes: ${nodeErr}`;
-
-      const batcher = new Batcher(1, nodes, flow, ZG_RPC_URL);
-      const kvKey = userKey(address, args.key);
-      const kvValue = Uint8Array.from(Buffer.from(args.value, 'utf-8'));
-      batcher.streamDataBuilder.set(ZG_STREAM_ID, kvKey, kvValue);
-
-      const [tx, batchErr] = await batcher.exec();
-      if (batchErr !== null) return `Error writing to KV store: ${batchErr}`;
+      const payload = JSON.stringify(
+        {
+          kind: 'memory',
+          namespace: address.toLowerCase(),
+          key: args.key,
+          value: args.value,
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      );
+      const { rootHash, transactionHash } = await uploadContentTo0g(
+        payload,
+        `0g-memory-${address.toLowerCase()}-${args.key}`
+      );
+      const index = await loadIndex();
+      index.memory[localFallbackMemoryKey(address, args.key)] = {
+        rootHash,
+        transactionHash,
+        updatedAt: new Date().toISOString(),
+      };
+      await saveIndex(index);
 
       return JSON.stringify(
         {
@@ -173,9 +209,10 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           network: ZG_NETWORK,
           key: args.key,
           namespace: address.toLowerCase(),
-          fullKey: `user:${address.toLowerCase()}:${args.key}`,
-          transactionHash: tx,
-          valueSizeBytes: kvValue.length,
+          rootHash,
+          transactionHash,
+          valueSizeBytes: Buffer.byteLength(args.value, 'utf-8'),
+          backend: '0g_file',
         },
         null,
         2
@@ -202,7 +239,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
 
   @CreateAction({
     name: 'zg_storage_get_memory',
-    description: 'Retrieve user-scoped memory from 0G KV storage.',
+    description: 'Retrieve user-scoped memory from 0G file storage (no KV dependency).',
     schema: ZgGetMemorySchema,
   })
   async getMemory(
@@ -211,29 +248,47 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
   ): Promise<string> {
     const address = args.userAddress || (await walletProvider.getAddress());
     try {
-      const { value, endpoint } = await readKvValueWithFallback(
-        ZG_STREAM_ID,
-        userKey(address, args.key)
-      );
-
-      if (!value || !value.data) {
+      const index = await loadIndex();
+      const entry = index.memory[localFallbackMemoryKey(address, args.key)];
+      if (!entry) {
+        if (ZG_ENABLE_LOCAL_FALLBACK) {
+          const fallbackValue = await readLocalFallbackValue(address, args.key);
+          if (fallbackValue !== null) {
+            return JSON.stringify({
+              status: 'memory_retrieved',
+              network: ZG_NETWORK,
+              key: args.key,
+              namespace: address.toLowerCase(),
+              backend: 'local_file',
+              fallbackPath: ZG_LOCAL_FALLBACK_PATH,
+              value: fallbackValue,
+            });
+          }
+        }
         return JSON.stringify({
           status: 'not_found',
           key: args.key,
           namespace: address.toLowerCase(),
-          kvEndpoint: endpoint,
         });
       }
-
-      const decoded = Buffer.from(value.data, 'base64').toString('utf-8');
+      const raw = await downloadContentFrom0g(entry.rootHash);
+      let value = raw;
+      try {
+        const parsed = JSON.parse(raw) as { value?: string };
+        if (typeof parsed.value === 'string') value = parsed.value;
+      } catch {
+        // Keep raw content as value.
+      }
       return JSON.stringify(
         {
           status: 'memory_retrieved',
           network: ZG_NETWORK,
           key: args.key,
           namespace: address.toLowerCase(),
-          kvEndpoint: endpoint,
-          value: decoded,
+          rootHash: entry.rootHash,
+          transactionHash: entry.transactionHash,
+          value,
+          backend: '0g_file',
         },
         null,
         2
@@ -250,7 +305,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
               namespace: address.toLowerCase(),
               backend: 'local_file',
               fallbackPath: ZG_LOCAL_FALLBACK_PATH,
-              warning: `0G KV read failed: ${err.message}`,
+              warning: `0G file read failed: ${err.message}`,
               value: fallbackValue,
             },
             null,
@@ -267,7 +322,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
 
   @CreateAction({
     name: 'zg_storage_upload_knowledge',
-    description: 'Upload a knowledge document to 0G file storage and index it in KV.',
+    description: 'Upload a knowledge document to 0G file storage (no KV dependency).',
     schema: ZgUploadKnowledgeSchema,
   })
   async uploadKnowledge(
@@ -275,53 +330,27 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgUploadKnowledgeSchema>
   ): Promise<string> {
     try {
-      const signer = getEthersSigner();
-      const indexer = new Indexer(ZG_INDEXER_RPC);
-
-      const fs = await import('fs');
-      const os = await import('os');
-      const path = await import('path');
-      const tmpFile = path.join(os.tmpdir(), `0g-kb-${Date.now()}-${args.label}.txt`);
-      fs.writeFileSync(tmpFile, args.content, 'utf-8');
-
-      const file = await ZgFile.fromFilePath(tmpFile);
-      const [tree, treeErr] = await file.merkleTree();
-      if (treeErr !== null) {
-        await file.close();
-        fs.unlinkSync(tmpFile);
-        return `Error computing Merkle tree: ${treeErr}`;
-      }
-
-      const rootHash = tree!.rootHash();
-      const [tx, uploadErr] = await indexer.upload(file, ZG_RPC_URL, signer as any);
-      await file.close();
-      fs.unlinkSync(tmpFile);
-      if (uploadErr !== null) return `Error uploading to 0G Storage: ${uploadErr}`;
-
-      try {
-        const [nodes, nodeErr] = await indexer.selectNodes(1);
-        if (nodeErr === null && nodes) {
-          const flow = getFlowContract(ZG_FLOW_CONTRACT, signer as any);
-          const batcher = new Batcher(1, nodes, flow, ZG_RPC_URL);
-          const indexKey = kbIndexKey(args.label);
-          const indexValue = Uint8Array.from(
-            Buffer.from(
-              JSON.stringify({
-                rootHash,
-                label: args.label,
-                uploadedAt: new Date().toISOString(),
-                contentLength: args.content.length,
-                transactionHash: tx,
-              }),
-              'utf-8'
-            )
-          );
-          batcher.streamDataBuilder.set(ZG_STREAM_ID, indexKey, indexValue);
-          await batcher.exec();
-        }
-      } catch (kvErr: any) {
-        console.warn('KV index write warning:', kvErr.message);
-      }
+      const payload = JSON.stringify(
+        {
+          kind: 'knowledge',
+          label: args.label,
+          content: args.content,
+          uploadedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      );
+      const { rootHash, transactionHash } = await uploadContentTo0g(
+        payload,
+        `0g-kb-${args.label}`
+      );
+      const index = await loadIndex();
+      index.knowledge[args.label] = {
+        rootHash,
+        transactionHash,
+        updatedAt: new Date().toISOString(),
+      };
+      await saveIndex(index);
 
       return JSON.stringify(
         {
@@ -329,8 +358,9 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           network: ZG_NETWORK,
           label: args.label,
           rootHash,
-          transactionHash: tx,
+          transactionHash,
           contentLength: args.content.length,
+          backend: '0g_file',
         },
         null,
         2
@@ -342,7 +372,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
 
   @CreateAction({
     name: 'zg_storage_get_knowledge',
-    description: 'Retrieve a knowledge document by label from 0G storage.',
+    description: 'Retrieve a knowledge document by label from 0G file storage (no KV dependency).',
     schema: ZgGetKnowledgeSchema,
   })
   async getKnowledge(
@@ -350,32 +380,21 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgGetKnowledgeSchema>
   ): Promise<string> {
     try {
-      const indexer = new Indexer(ZG_INDEXER_RPC);
-
-      let indexEntry: any;
-
-      try {
-        const { value: kvResult } = await readKvValueWithFallback(
-          ZG_STREAM_ID,
-          kbIndexKey(args.label)
-        );
-        if (!kvResult || !kvResult.data) {
-          return JSON.stringify({ status: 'not_found', label: args.label });
-        }
-        indexEntry = JSON.parse(Buffer.from(kvResult.data, 'base64').toString('utf-8'));
-      } catch {
+      const index = await loadIndex();
+      const indexEntry = index.knowledge[args.label];
+      if (!indexEntry) {
         return JSON.stringify({ status: 'not_found', label: args.label });
       }
-
-      const fs = await import('fs');
-      const os = await import('os');
-      const path = await import('path');
-      const outputPath = path.join(os.tmpdir(), `0g-kb-download-${Date.now()}.txt`);
-      const downloadErr = await indexer.download(indexEntry.rootHash, outputPath, true);
-      if (downloadErr !== null) return `Error downloading from 0G Storage: ${downloadErr}`;
-
-      const content = fs.readFileSync(outputPath, 'utf-8');
-      fs.unlinkSync(outputPath);
+      const raw = await downloadContentFrom0g(indexEntry.rootHash);
+      let content = raw;
+      let uploadedAt: string | undefined = indexEntry.updatedAt;
+      try {
+        const parsed = JSON.parse(raw) as { content?: string; uploadedAt?: string };
+        if (typeof parsed.content === 'string') content = parsed.content;
+        if (typeof parsed.uploadedAt === 'string') uploadedAt = parsed.uploadedAt;
+      } catch {
+        // Keep raw content.
+      }
 
       return JSON.stringify(
         {
@@ -383,9 +402,11 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           network: ZG_NETWORK,
           label: args.label,
           rootHash: indexEntry.rootHash,
-          uploadedAt: indexEntry.uploadedAt,
+          uploadedAt,
+          transactionHash: indexEntry.transactionHash,
           content,
           verified: true,
+          backend: '0g_file',
         },
         null,
         2

@@ -3,6 +3,10 @@ import { PrivyClient, type LinkedAccountWithMetadata } from '@privy-io/server-au
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
 const PRIVY_VERIFICATION_KEY = process.env.PRIVY_VERIFICATION_KEY;
+const PRIVY_WALLET_AUTH_PRIVATE_KEY = process.env.PRIVY_WALLET_AUTH_PRIVATE_KEY;
+
+const hasWrappingQuotes = (value: string) =>
+  (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"));
 
 if (!PRIVY_APP_ID) {
   throw new Error('Missing NEXT_PUBLIC_PRIVY_APP_ID (or PRIVY_APP_ID) environment variable');
@@ -12,9 +16,21 @@ if (!PRIVY_APP_SECRET) {
   throw new Error('Missing PRIVY_APP_SECRET environment variable for server-side wallet access');
 }
 
+if (hasWrappingQuotes(PRIVY_APP_ID)) {
+  throw new Error('NEXT_PUBLIC_PRIVY_APP_ID (or PRIVY_APP_ID) must not be wrapped in quotes');
+}
+
+if (hasWrappingQuotes(PRIVY_APP_SECRET)) {
+  throw new Error('PRIVY_APP_SECRET must not be wrapped in quotes');
+}
+
+if (PRIVY_WALLET_AUTH_PRIVATE_KEY && !PRIVY_WALLET_AUTH_PRIVATE_KEY.startsWith('wallet-auth:')) {
+  throw new Error('PRIVY_WALLET_AUTH_PRIVATE_KEY must start with "wallet-auth:"');
+}
+
 const privy = new PrivyClient(PRIVY_APP_ID, PRIVY_APP_SECRET, {
   walletApi: {
-    authorizationPrivateKey: process.env.PRIVY_WALLET_AUTH_PRIVATE_KEY,
+    authorizationPrivateKey: PRIVY_WALLET_AUTH_PRIVATE_KEY,
   },
 });
 
@@ -52,6 +68,52 @@ async function isWalletSignable(walletId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export type PrivySignabilityReport = {
+  ok: boolean;
+  userId: string;
+  matchedAddress: string | null;
+  signableWalletId: string | null;
+  reason?: string;
+};
+
+export async function getPrivySignabilityReport(accessToken: string): Promise<PrivySignabilityReport> {
+  if (!accessToken) {
+    throw new Error('Missing Privy access token');
+  }
+
+  if (!PRIVY_VERIFICATION_KEY) {
+    throw new Error('Missing PRIVY_VERIFICATION_KEY');
+  }
+
+  const claims = await privy.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
+  const user = await privy.getUserById(claims.userId);
+  const candidateAddresses = extractCandidateEvmAddresses(user);
+  const { data: wallets } = await privy.walletApi.getWallets({ chainType: 'ethereum' });
+  const matches = wallets?.filter((w) => candidateAddresses.includes(normalizeEvmAddress(w.address))) ?? [];
+
+  for (const match of matches) {
+    if (await isWalletSignable(match.id)) {
+      return {
+        ok: true,
+        userId: claims.userId,
+        matchedAddress: normalizeEvmAddress(match.address),
+        signableWalletId: match.id,
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    userId: claims.userId,
+    matchedAddress: matches[0] ? normalizeEvmAddress(matches[0].address) : null,
+    signableWalletId: null,
+    reason:
+      matches.length > 0
+        ? 'Matched wallet exists but is not signable with current wallet auth key for this app.'
+        : 'No wallet matched this user within current app wallet scope.',
+  };
 }
 
 export async function getPrivyEvmWalletAddress(accessToken: string): Promise<string> {

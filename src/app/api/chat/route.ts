@@ -174,6 +174,7 @@ export async function POST(req: Request) {
     let zgTxHash: string | null = null;
     let zgError: string | null = null;
     let forcedResponse: string | null = null;
+    let privyPairingWarning: string | null = null;
     const sessionKey = sessionKeyFromAccessToken(accessToken);
 
     const getActions = async (requireSignable: boolean): Promise<ActionLike[]> => {
@@ -215,6 +216,18 @@ export async function POST(req: Request) {
         if (!accessToken) {
           forcedResponse = 'I can prepare that swap, but please connect/sign in first so I can quote and execute it.';
         } else {
+          try {
+            const { getPrivySignabilityReport } = await import('@/lib/privy');
+            const report = await getPrivySignabilityReport(accessToken);
+            if (!report.ok) {
+              privyPairingWarning =
+                'Heads up: your current Privy wallet auth key is not authorized to sign for this wallet in this app. ' +
+                'Quotes can still work, but swap execution will fail until key/app pairing is fixed.';
+            }
+          } catch (privyPreflightErr) {
+            console.warn('Privy signability preflight failed:', privyPreflightErr);
+          }
+
           const actions = await getActions(false);
           const { amount, sell, buy } = swapIntent;
 
@@ -245,7 +258,8 @@ export async function POST(req: Request) {
           forcedResponse =
             `Estimated quote for swapping ${amount} ${sell} -> ${buy} on Ethereum Sepolia is ` +
             `${fromSmallestUnit(amountOut, buy)} ${buy} (subject to slippage/market movement). ` +
-            `Reply "confirm swap" to proceed.`;
+            `Reply "confirm swap" to proceed.` +
+            (privyPairingWarning ? `\n\n${privyPairingWarning}` : '');
         }
       } catch (intentErr) {
         console.warn('Swap quote flow failed:', intentErr);

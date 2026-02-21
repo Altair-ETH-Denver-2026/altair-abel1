@@ -1,5 +1,6 @@
 'use client';
 
+import { Children } from 'react';
 import { PrivyProvider } from '@privy-io/react-auth';
 import { sepolia } from 'viem/chains';
 
@@ -9,6 +10,8 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   if (!appId) {
     throw new Error('Missing NEXT_PUBLIC_PRIVY_APP_ID (or PRIVY_APP_ID) environment variable');
   }
+
+  const normalizedChildren = Children.toArray(children);
 
   return (
     <PrivyProvider
@@ -24,7 +27,7 @@ export default function Providers({ children }: { children: React.ReactNode }) {
         supportedChains: [sepolia],
       }}
     >
-      {children}
+      {normalizedChildren}
     </PrivyProvider>
   );
 }

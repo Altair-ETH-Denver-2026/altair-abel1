@@ -40,6 +40,7 @@ export async function POST(req: Request) {
     const { actions } = await createAgent({
       accessToken,
       evmRpcUrl: process.env.ETH_SEPOLIA_RPC_URL ?? 'https://ethereum-sepolia-rpc.publicnode.com',
+      requireSignable: false,
     });
     const typedActions = actions as unknown as ActionLike[];
 

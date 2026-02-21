@@ -98,7 +98,14 @@ export async function getPrivyEvmWalletAddress(accessToken: string): Promise<str
   );
 }
 
-export async function ensurePrivyEmbeddedEvmWallet(accessToken: string): Promise<{ walletId: string; address: string }> {
+type EnsurePrivyEmbeddedEvmWalletOptions = {
+  requireSignable?: boolean;
+};
+
+export async function ensurePrivyEmbeddedEvmWallet(
+  accessToken: string,
+  options?: EnsurePrivyEmbeddedEvmWalletOptions
+): Promise<{ walletId: string; address: string }> {
   if (!accessToken) {
     throw new Error('Missing Privy access token');
   }
@@ -138,12 +145,20 @@ export async function ensurePrivyEmbeddedEvmWallet(accessToken: string): Promise
     return { signable: null, fallback };
   };
 
+  const requireSignable = options?.requireSignable ?? true;
   const existing = await findControllableWallet();
   if (existing.signable) {
     console.log('[Privy] Found controllable embedded EVM wallet:', existing.signable);
     return existing.signable;
   }
   if (existing.fallback) {
+    if (!requireSignable) {
+      console.warn(
+        '[Privy] Matched EVM wallet is not signable with current auth key. ' +
+        `Using fallback walletId ${existing.fallback.walletId} for non-signing operations.`
+      );
+      return existing.fallback;
+    }
     throw new Error(
       `Matched EVM wallet ${existing.fallback.address} is not signable with current Privy auth key. ` +
       'This indicates a wallet/app authorization pairing issue. ' +

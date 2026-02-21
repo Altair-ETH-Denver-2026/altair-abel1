@@ -176,7 +176,7 @@ export async function POST(req: Request) {
     let forcedResponse: string | null = null;
     const sessionKey = sessionKeyFromAccessToken(accessToken);
 
-    const getActions = async (): Promise<ActionLike[]> => {
+    const getActions = async (requireSignable: boolean): Promise<ActionLike[]> => {
       if (!accessToken) return [];
       const { createAgent } = await import('@/lib/setup');
       const { actions } = await createAgent({
@@ -184,6 +184,7 @@ export async function POST(req: Request) {
         evmRpcUrl:
           process.env.ETH_SEPOLIA_RPC_URL
           ?? 'https://ethereum-sepolia-rpc.publicnode.com',
+        requireSignable,
       });
       return actions as unknown as ActionLike[];
     };
@@ -214,7 +215,7 @@ export async function POST(req: Request) {
         if (!accessToken) {
           forcedResponse = 'I can prepare that swap, but please connect/sign in first so I can quote and execute it.';
         } else {
-          const actions = await getActions();
+          const actions = await getActions(false);
           const { amount, sell, buy } = swapIntent;
 
           const tokenIn = tokenAddressFromSymbol(sell);
@@ -260,7 +261,7 @@ export async function POST(req: Request) {
       const pending = pendingSwapBySession.get(sessionKey);
       if (pending) {
         try {
-          const actions = await getActions();
+          const actions = await getActions(true);
           const tokenIn = tokenAddressFromSymbol(pending.sell);
           const tokenOut = tokenAddressFromSymbol(pending.buy);
           if (!tokenIn || !tokenOut) {
@@ -327,7 +328,7 @@ export async function POST(req: Request) {
     // Automatically persist chat and trade context to 0G per-user memory.
     if (accessToken) {
       try {
-        const actions = await getActions();
+        const actions = await getActions(false);
         const saveMemoryAction = findStorageSaveAction(actions);
         if (!saveMemoryAction) {
           const available = actions.map((a) => a.name ?? '(unnamed)').join(', ');

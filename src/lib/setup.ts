@@ -8,13 +8,15 @@ import { ensurePrivyEmbeddedEvmWallet } from './privy';
 type CreateWalletProviderParams = {
   accessToken: string;
   evmRpcUrl?: string;
+  requireSignable?: boolean;
 };
 
 export async function createWalletProvider({
   accessToken,
   evmRpcUrl,
+  requireSignable,
 }: CreateWalletProviderParams) {
-  const { walletId } = await ensurePrivyEmbeddedEvmWallet(accessToken);
+  const { walletId } = await ensurePrivyEmbeddedEvmWallet(accessToken, { requireSignable });
 
   return PrivyWalletProvider.configureWithWallet({
     appId: process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID ?? '',
@@ -31,12 +33,13 @@ export async function createWalletProvider({
 type CreateAgentParams = {
   accessToken: string;
   evmRpcUrl?: string;
+  requireSignable?: boolean;
 };
 
 type AgentKitInit = NonNullable<Parameters<typeof AgentKit.from>[0]>;
 
-export async function createAgent({ accessToken, evmRpcUrl }: CreateAgentParams) {
-  const walletProvider = await createWalletProvider({ accessToken, evmRpcUrl });
+export async function createAgent({ accessToken, evmRpcUrl, requireSignable }: CreateAgentParams) {
+  const walletProvider = await createWalletProvider({ accessToken, evmRpcUrl, requireSignable });
 
   const agentKit = await AgentKit.from(
     {

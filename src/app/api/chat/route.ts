@@ -25,6 +25,25 @@ type ActionLike = {
   invoke: (args: Record<string, unknown>) => Promise<unknown>;
 };
 
+type SwapIntent = {
+  amount: number;
+  sell: string;
+  buy: string;
+};
+
+function extractSwapIntentFromMessage(message: string): SwapIntent | null {
+  const match = message.match(
+    /\bswap\s+([0-9]*\.?[0-9]+)\s*([a-zA-Z]+)\s+(?:for|to|into)\s+([a-zA-Z]+)/i
+  );
+  if (!match) return null;
+
+  const amount = Number(match[1]);
+  const sell = String(match[2]).toUpperCase();
+  const buy = String(match[3]).toUpperCase();
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return { amount, sell, buy };
+}
+
 function toObject(value: unknown): Record<string, unknown> | null {
   if (typeof value === 'object' && value !== null) {
     return value as Record<string, unknown>;
@@ -48,15 +67,19 @@ function extractTxHash(value: unknown): string | null {
   return typeof txHash === 'string' ? txHash : null;
 }
 
+function sanitizeAssistantReply(text: string): string {
+  return text.replace(/```[\s\S]*?```/g, '').trim();
+}
+
 export async function POST(req: Request) {
   try {
     const { message, history, accessToken } = await req.json();
 
     const systemPrompt = `
-      You are Altair, a DeFi concierge on Ethereum Sepolia testnet. 
-      Identify: Sell Token, Buy Token, and Amount.
-      If info is missing, ask. If ready, return JSON:
-      { "type": "SWAP_INTENT", "sell": "ETH", "buy": "USDC", "amount": 0.1 }
+      You are Altair, a DeFi concierge on Ethereum Sepolia testnet.
+      Reply in plain English only.
+      Never output JSON, code blocks, or schema-like responses.
+      If the user asks for a swap and details are missing, ask a short clarifying question.
     `;
 
     // Actual OpenAI Call
@@ -92,57 +115,49 @@ export async function POST(req: Request) {
     const findAction = (actions: ActionLike[], name: string): ActionLike | undefined =>
       actions.find((a) => a.name === name);
 
-    // Attempt to execute swap intent with AgentKit tools if model returned JSON.
-    const trimmed = aiResponse.trim();
-    const looksLikeJson = trimmed.startsWith('{') && trimmed.endsWith('}');
-    if (looksLikeJson) {
+    // Attempt to execute swap intent based on user message.
+    const swapIntent = extractSwapIntentFromMessage(message);
+    if (swapIntent) {
       try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed?.type === 'SWAP_INTENT') {
-          if (!accessToken) {
-            executionNote = 'Swap intent detected, but user is not authenticated. Please connect/sign in first.';
-          } else {
-            const actions = await getActions();
+        if (!accessToken) {
+          executionNote = 'Swap intent detected, but user is not authenticated. Please connect/sign in first.';
+        } else {
+          const actions = await getActions();
+          const { amount, sell, buy } = swapIntent;
 
-            const sell = String(parsed.sell ?? '');
-            const buy = String(parsed.buy ?? '');
-            const amount = Number(parsed.amount);
-            if (!sell || !buy || !Number.isFinite(amount) || amount <= 0) {
-              throw new Error('SWAP_INTENT is missing valid sell/buy/amount fields');
-            }
-
-            const tokenIn = tokenAddressFromSymbol(sell);
-            const tokenOut = tokenAddressFromSymbol(buy);
-            if (!tokenIn || !tokenOut) {
-              throw new Error(`Unsupported token symbol pair: ${sell} -> ${buy}`);
-            }
-
-            const uniswapSwapAction = findAction(actions, 'uniswap_swap');
-            if (!uniswapSwapAction) {
-              throw new Error('uniswap_swap action not registered');
-            }
-
-            const result = await uniswapSwapAction.invoke({
-              tokenIn,
-              tokenOut,
-              amount: toSmallestUnit(amount, sell),
-              slippageTolerance: 0.5,
-            });
-
-            swapRecord = {
-              sell,
-              buy,
-              amount,
-              tokenIn,
-              tokenOut,
-              result,
-              createdAt: new Date().toISOString(),
-            };
-            executionNote = `Swap tool executed for ${amount} ${sell} -> ${buy}.\n${String(result)}`;
+          const tokenIn = tokenAddressFromSymbol(sell);
+          const tokenOut = tokenAddressFromSymbol(buy);
+          if (!tokenIn || !tokenOut) {
+            throw new Error(`Unsupported token symbol pair: ${sell} -> ${buy}`);
           }
+
+          const uniswapSwapAction = findAction(actions, 'uniswap_swap');
+          if (!uniswapSwapAction) {
+            throw new Error('uniswap_swap action not registered');
+          }
+
+          const result = await uniswapSwapAction.invoke({
+            tokenIn,
+            tokenOut,
+            amount: toSmallestUnit(amount, sell),
+            slippageTolerance: 0.5,
+          });
+
+          swapRecord = {
+            sell,
+            buy,
+            amount,
+            tokenIn,
+            tokenOut,
+            result,
+            createdAt: new Date().toISOString(),
+          };
+          const swapTx = extractTxHash(result);
+          executionNote = swapTx
+            ? `Swap submitted on Ethereum Sepolia for ${amount} ${sell} -> ${buy}. Tx: ${swapTx}`
+            : `Swap submitted on Ethereum Sepolia for ${amount} ${sell} -> ${buy}.`;
         }
       } catch (intentErr) {
-        // If parsing fails, we just return the AI text; log server-side
         console.warn('Swap intent parse/exec skipped:', intentErr);
       }
     }
@@ -183,8 +198,9 @@ export async function POST(req: Request) {
       }
     }
 
+    const cleanedReply = sanitizeAssistantReply(aiResponse);
     return NextResponse.json({
-      content: executionNote ? `${executionNote}\n\n${aiResponse}` : aiResponse,
+      content: executionNote ? `${executionNote}\n\n${cleanedReply}` : cleanedReply,
       zgHash: zgTxHash,
       txHash: zgTxHash,
       zgError,

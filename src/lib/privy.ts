@@ -1,4 +1,5 @@
 import { PrivyClient, type AuthorizationContext } from '@privy-io/node';
+import { importSPKI, jwtVerify } from 'jose';
 
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID;
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET;
@@ -7,6 +8,22 @@ const PRIVY_WALLET_AUTH_PRIVATE_KEY = process.env.PRIVY_WALLET_AUTH_PRIVATE_KEY;
 
 const hasWrappingQuotes = (value: string) =>
   (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"));
+
+const stripBearerPrefix = (token: string) => token.replace(/^Bearer\s+/i, '').trim();
+
+function normalizeVerificationKeyPem(rawKey?: string): string | null {
+  if (!rawKey) return null;
+  const key = rawKey.replace(/\\n/g, '\n').trim();
+  if (!key.includes('BEGIN PUBLIC KEY')) return null;
+
+  // Handle single-line PEM values in .env by rebuilding standard PEM formatting.
+  const body = key
+    .replace('-----BEGIN PUBLIC KEY-----', '')
+    .replace('-----END PUBLIC KEY-----', '')
+    .replace(/\s+/g, '');
+  const chunked = body.match(/.{1,64}/g)?.join('\n') ?? body;
+  return `-----BEGIN PUBLIC KEY-----\n${chunked}\n-----END PUBLIC KEY-----`;
+}
 
 if (!PRIVY_APP_ID) {
   throw new Error('Missing NEXT_PUBLIC_PRIVY_APP_ID (or PRIVY_APP_ID) environment variable');
@@ -53,22 +70,43 @@ function getNestedString(obj: unknown, keyA: string, keyB: string): string | und
 }
 
 async function verifyAccessTokenClaims(accessToken: string): Promise<AccessClaims> {
+  const normalizedToken = stripBearerPrefix(accessToken);
   const clientAny = privy as unknown as {
     verifyAuthToken?: (token: string, verificationKey?: string) => Promise<unknown>;
     utils?: () => { auth: () => { verifyAccessToken: (params: { access_token: string }) => Promise<unknown> } };
   };
 
-  if (typeof clientAny.verifyAuthToken === 'function') {
-    const claims = await clientAny.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
-    const userId = getString(claims, 'userId') ?? getString(claims, 'user_id');
-    if (!userId) throw new Error('Unable to resolve userId from Privy auth token');
-    return { userId };
+  try {
+    if (typeof clientAny.verifyAuthToken === 'function') {
+      const claims = await clientAny.verifyAuthToken(normalizedToken, PRIVY_VERIFICATION_KEY);
+      const userId = getString(claims, 'userId') ?? getString(claims, 'user_id') ?? getString(claims, 'sub');
+      if (!userId) throw new Error('Unable to resolve userId from Privy auth token');
+      return { userId };
+    }
+  } catch {
+    // Fall through to other verification options.
   }
 
-  if (typeof clientAny.utils === 'function') {
-    const claims = await clientAny.utils().auth().verifyAccessToken({ access_token: accessToken });
-    const userId = getString(claims, 'userId') ?? getString(claims, 'user_id');
-    if (!userId) throw new Error('Unable to resolve userId from Privy access token');
+  try {
+    if (typeof clientAny.utils === 'function') {
+      const claims = await clientAny.utils().auth().verifyAccessToken({ access_token: normalizedToken });
+      const userId = getString(claims, 'userId') ?? getString(claims, 'user_id') ?? getString(claims, 'sub');
+      if (!userId) throw new Error('Unable to resolve userId from Privy access token');
+      return { userId };
+    }
+  } catch {
+    // Fall through to manual JWT verification.
+  }
+
+  const verificationPem = normalizeVerificationKeyPem(PRIVY_VERIFICATION_KEY);
+  if (verificationPem) {
+    const key = await importSPKI(verificationPem, 'ES256');
+    const { payload } = await jwtVerify(normalizedToken, key, {
+      issuer: 'privy.io',
+      audience: PRIVY_APP_ID,
+    });
+    const userId = typeof payload.sub === 'string' ? payload.sub : undefined;
+    if (!userId) throw new Error('Unable to resolve userId from token payload');
     return { userId };
   }
 

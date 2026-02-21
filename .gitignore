@@ -25,6 +25,7 @@
 *.pem
 .idea/
 .cursor/
+.cache/
 
 # debug
 npm-debug.log*

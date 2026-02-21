@@ -62,9 +62,13 @@ function sessionKeyFromAccessToken(accessToken?: string | null): string {
 }
 
 function extractSwapIntentFromMessage(message: string): SwapIntent | null {
-  const match = message.match(
-    /\bswap\s+([0-9]*\.?[0-9]+)\s*([a-zA-Z]+)\s+(?:for|to|into)\s+([a-zA-Z]+)/i
-  );
+  const patterns = [
+    /\b(?:swap|swapping)\s+([0-9]*\.?[0-9]+)\s*([a-zA-Z]+)\s+(?:for|to|into)\s+([a-zA-Z]+)/i,
+    /\bquote(?:\s+for)?\s+(?:swapping|swap)\s+([0-9]*\.?[0-9]+)\s*([a-zA-Z]+)\s+(?:for|to|into)\s+([a-zA-Z]+)/i,
+    /\b([0-9]*\.?[0-9]+)\s*([a-zA-Z]+)\s+(?:for|to|into)\s+([a-zA-Z]+)\s+(?:quote|swap|swapping)\b/i,
+  ];
+
+  const match = patterns.map((p) => message.match(p)).find(Boolean);
   if (!match) return null;
 
   const amount = Number(match[1]);

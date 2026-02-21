@@ -1,3 +1,4 @@
+import 'reflect-metadata';
 import { AgentKit, PrivyWalletProvider } from '@coinbase/agentkit';
 import { uniswapActionProvider } from './providers/uniswapActionProvider';
 import { zgInferenceActionProvider } from './providers/zgInferenceActionProvider';

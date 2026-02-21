@@ -90,8 +90,8 @@ export default function Chat() {
                   </div>
                 )}
                 {m.zgError && (
-                  <div className="flex items-center gap-2 mt-1 text-[10px] text-yellow-400">
-                    0G upload failed
+                  <div className="flex items-center gap-2 mt-1 text-[10px] text-yellow-400" title={m.zgError}>
+                    {`0G upload failed: ${m.zgError}`}
                   </div>
                 )}
               </div>

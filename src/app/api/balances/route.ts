@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createPublicClient, http, formatEther, formatUnits } from 'viem';
 import { sepolia } from 'viem/chains';
-import { ensurePrivyEmbeddedEvmWallet } from '@/lib/privy';
+import { ensurePrivyEmbeddedEvmWallet, getPrivyEvmWalletAddress } from '@/lib/privy';
 import { cookies } from 'next/headers';
 
 const USDC_ABI = [
@@ -38,18 +38,36 @@ export async function POST(req: Request) {
       try {
         resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(tokenToVerify)).address;
       } catch (firstErr) {
-        // If caller passed an invalid/stale token, fallback to cookie token when available.
-        if (accessToken && cookieToken && accessToken !== cookieToken) {
-          resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(cookieToken)).address;
-        } else {
-          throw firstErr;
+        console.warn('Embedded wallet resolution failed, trying address-only fallback:', firstErr);
+        try {
+          resolvedAddress = await getPrivyEvmWalletAddress(tokenToVerify);
+        } catch (secondErr) {
+          console.warn('Address-only fallback failed:', secondErr);
+          // If caller passed an invalid/stale token, try cookie token as a final fallback.
+          if (accessToken && cookieToken && accessToken !== cookieToken) {
+            try {
+              resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(cookieToken)).address;
+            } catch (thirdErr) {
+              console.warn('Cookie embedded wallet fallback failed:', thirdErr);
+              try {
+                resolvedAddress = await getPrivyEvmWalletAddress(cookieToken);
+              } catch (fourthErr) {
+                console.warn('Cookie address-only fallback failed:', fourthErr);
+              }
+            }
+          }
         }
       }
     }
     const addressToQuery = (overrideAddress ?? resolvedAddress) as `0x${string}` | null;
 
     if (!addressToQuery) {
-      return NextResponse.json({ error: 'Unable to resolve wallet address' }, { status: 401 });
+      return NextResponse.json({
+        address: null,
+        eth: '0',
+        usdc: '0',
+        warning: 'Unable to resolve wallet address for this session',
+      });
     }
 
     const client = createPublicClient({
@@ -98,6 +116,11 @@ export async function POST(req: Request) {
   } catch (error) {
     console.error('Balance fetch error:', error);
     const message = error instanceof Error ? error.message : 'Unexpected error';
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({
+      address: null,
+      eth: '0',
+      usdc: '0',
+      warning: message,
+    });
   }
 }

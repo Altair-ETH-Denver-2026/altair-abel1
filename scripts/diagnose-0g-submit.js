@@ -60,11 +60,26 @@ async function main() {
           : Array.isArray(submission?.data)
             ? submission.data.length
             : null,
+        dataHexPrefix:
+          typeof submission?.data === 'string' ? submission.data.slice(0, 66) : null,
+        tagsHex: submission?.tags ?? null,
         nodesLength: submission.nodes?.length ?? 0,
+        nodesPreview: Array.isArray(submission?.nodes)
+          ? submission.nodes.slice(0, 3).map((n) => ({
+            root: n.root,
+            height: String(n.height),
+          }))
+          : [],
       };
 
     if (submission && flowAddress) {
       const flow = getFlowContract(flowAddress, signer);
+      const encodedSubmit = flow.interface.encodeFunctionData('submit', [submission]);
+      report.checks.submitCalldata = {
+        selector: encodedSubmit.slice(0, 10),
+        length: encodedSubmit.length,
+        prefix: encodedSubmit.slice(0, 138),
+      };
       try {
         const market = await flow.market();
         report.checks.flowMarket = { ok: true, market };

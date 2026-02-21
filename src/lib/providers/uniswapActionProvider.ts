@@ -282,16 +282,32 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
 
       const routing = quoteResponse.routing;
       if (routing === 'CLASSIC' || routing === 'WRAP_UNWRAP' || routing === 'BRIDGE') {
-        const swapBody: Record<string, any> = {
+        const baseSwapBody: Record<string, any> = {
           quote: quoteResponse.quote,
-          simulateTransaction: true,
         };
         if (signature && quoteResponse.permitData) {
-          swapBody.signature = signature;
-          swapBody.permitData = quoteResponse.permitData;
+          baseSwapBody.signature = signature;
+          baseSwapBody.permitData = quoteResponse.permitData;
         }
 
-        const swapResponse = await this.api<SwapResponse>('/swap', swapBody);
+        let swapResponse: SwapResponse;
+        try {
+          // First try with simulation for safer execution.
+          swapResponse = await this.api<SwapResponse>('/swap', {
+            ...baseSwapBody,
+            simulateTransaction: true,
+          });
+        } catch (simErr: any) {
+          const msg = String(simErr?.message ?? simErr);
+          const isSimulationFetchFailure =
+            msg.includes('/swap returned 404')
+            || msg.includes('Failed to fetch gas fee and/or simulate transaction');
+          if (!isSimulationFetchFailure) {
+            throw simErr;
+          }
+          // Fallback for testnet APIs that intermittently fail simulation fetches.
+          swapResponse = await this.api<SwapResponse>('/swap', baseSwapBody);
+        }
         if (swapResponse.txFailureReasons?.length) {
           return `Swap simulation failed: ${swapResponse.txFailureReasons.join(', ')}`;
         }

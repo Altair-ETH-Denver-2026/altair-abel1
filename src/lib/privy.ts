@@ -144,11 +144,11 @@ export async function ensurePrivyEmbeddedEvmWallet(accessToken: string): Promise
     return existing.signable;
   }
   if (existing.fallback) {
-    console.warn(
-      '[Privy] Matched EVM wallet is not signable with current auth key. ' +
-      `Using fallback walletId ${existing.fallback.walletId} for non-signing operations.`
+    throw new Error(
+      `Matched EVM wallet ${existing.fallback.address} is not signable with current Privy auth key. ` +
+      'This indicates a wallet/app authorization pairing issue. ' +
+      'Rotate PRIVY_WALLET_AUTH_PRIVATE_KEY (wallet-auth:...) for this app and re-authorize the wallet.'
     );
-    return existing.fallback;
   }
 
   throw new Error(

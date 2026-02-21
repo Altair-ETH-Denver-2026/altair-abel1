@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Altair DeFi (Sepolia + 0G)
 
-## Getting Started
+Altair is a Next.js app that integrates:
+- Privy embedded wallets
+- Uniswap Trading API on Ethereum Sepolia
+- 0G storage actions with resilient fallback behavior
 
-First, run the development server:
+## Run Locally
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+corepack yarn dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+App runs at `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Core Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Privy
+- `NEXT_PUBLIC_PRIVY_APP_ID`
+- `PRIVY_APP_SECRET`
+- `PRIVY_VERIFICATION_KEY`
+- `PRIVY_WALLET_AUTH_PRIVATE_KEY` (must be a valid `wallet-auth:...` value)
 
-## Learn More
+### Uniswap / Chain
+- `UNISWAP_API_KEY`
+- `ETH_SEPOLIA_RPC_URL`
 
-To learn more about Next.js, take a look at the following resources:
+### 0G
+- `ZG_PRIVATE_KEY`
+- `ZG_RPC_URL`
+- `ZG_INDEXER_RPC`
+- `ZG_NETWORK`
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 0G Storage Modes
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+`zgStorageActionProvider` supports runtime mode selection:
 
-## Deploy on Vercel
+- `ZG_STORAGE_MODE=onchain_0g`  
+  Attempt only on-chain 0G file storage.
+- `ZG_STORAGE_MODE=hybrid` (default)  
+  Attempt on-chain first, then fallback to local cache when unavailable.
+- `ZG_STORAGE_MODE=local_only`  
+  Skip on-chain writes and use local cache only.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Related controls:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `ZG_ENABLE_LOCAL_FALLBACK=true|false`
+- `ZG_CIRCUIT_BREAKER_THRESHOLD` (default `3`)
+- `ZG_CIRCUIT_BREAKER_COOLDOWN_MS` (default `300000`)
+- `ZG_LOCAL_FALLBACK_PATH` (default `.cache/zg-memory-fallback.json`)
+- `ZG_LOCAL_INDEX_PATH` (default `.cache/zg-storage-index.json`)
+
+## Diagnostics
+
+Preflight health endpoint:
+
+- `GET /api/test-0g-preflight`
+
+Write/read smoke test endpoint:
+
+- `POST /api/test-0g-write-read`
+
+Low-level flow submit diagnostics script:
+
+```bash
+corepack yarn diag:0g-submit
+```
+
+This script captures chain/indexer/node context and submit/upload failure details for debugging `flow.submit` reverts.

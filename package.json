@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "diag:0g-submit": "node scripts/diagnose-0g-submit.js"
   },
   "dependencies": {
     "@0glabs/0g-serving-broker": "^0.7.1",

@@ -22,6 +22,15 @@ const ZG_LOCAL_FALLBACK_PATH =
   process.env.ZG_LOCAL_FALLBACK_PATH ?? path.join(process.cwd(), '.cache', 'zg-memory-fallback.json');
 const ZG_LOCAL_INDEX_PATH =
   process.env.ZG_LOCAL_INDEX_PATH ?? path.join(process.cwd(), '.cache', 'zg-storage-index.json');
+type StorageMode = 'onchain_0g' | 'hybrid' | 'local_only';
+const ZG_STORAGE_MODE = (process.env.ZG_STORAGE_MODE ?? 'hybrid') as StorageMode;
+const ZG_CIRCUIT_BREAKER_THRESHOLD = Number(process.env.ZG_CIRCUIT_BREAKER_THRESHOLD ?? 3);
+const ZG_CIRCUIT_BREAKER_COOLDOWN_MS = Number(process.env.ZG_CIRCUIT_BREAKER_COOLDOWN_MS ?? 300000);
+
+const writeCircuitState: { consecutiveFailures: number; openUntil: number } = {
+  consecutiveFailures: 0,
+  openUntil: 0,
+};
 
 const ZgSaveMemorySchema = z.object({
   key: z.string().describe('Memory key, e.g. preferences or risk_tolerance.'),
@@ -127,6 +136,32 @@ function extractTxHash(tx: unknown): string | null {
   return null;
 }
 
+function isCircuitOpenNow(): boolean {
+  return Date.now() < writeCircuitState.openUntil;
+}
+
+function shouldAttemptOnchainWrite(): { shouldAttempt: boolean; reason?: string } {
+  if (ZG_STORAGE_MODE === 'local_only') {
+    return { shouldAttempt: false, reason: 'storage_mode_local_only' };
+  }
+  if (isCircuitOpenNow()) {
+    return { shouldAttempt: false, reason: 'circuit_breaker_open' };
+  }
+  return { shouldAttempt: true };
+}
+
+function markOnchainWriteSuccess(): void {
+  writeCircuitState.consecutiveFailures = 0;
+  writeCircuitState.openUntil = 0;
+}
+
+function markOnchainWriteFailure(): void {
+  writeCircuitState.consecutiveFailures += 1;
+  if (writeCircuitState.consecutiveFailures >= ZG_CIRCUIT_BREAKER_THRESHOLD) {
+    writeCircuitState.openUntil = Date.now() + ZG_CIRCUIT_BREAKER_COOLDOWN_MS;
+  }
+}
+
 async function uploadContentTo0g(content: string, namePrefix: string): Promise<{
   rootHash: string;
   transactionHash: string | null;
@@ -179,7 +214,11 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgSaveMemorySchema>
   ): Promise<string> {
     const address = args.userAddress || (await walletProvider.getAddress());
+    const attemptDecision = shouldAttemptOnchainWrite();
     try {
+      if (!attemptDecision.shouldAttempt) {
+        throw new Error(`0G write skipped: ${attemptDecision.reason}`);
+      }
       const payload = JSON.stringify(
         {
           kind: 'memory',
@@ -195,6 +234,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
         payload,
         `0g-memory-${address.toLowerCase()}-${args.key}`
       );
+      markOnchainWriteSuccess();
       const index = await loadIndex();
       index.memory[localFallbackMemoryKey(address, args.key)] = {
         rootHash,
@@ -213,11 +253,17 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           transactionHash,
           valueSizeBytes: Buffer.byteLength(args.value, 'utf-8'),
           backend: '0g_file',
+          storageMode: ZG_STORAGE_MODE,
+          circuitBreaker: {
+            open: isCircuitOpenNow(),
+            consecutiveFailures: writeCircuitState.consecutiveFailures,
+          },
         },
         null,
         2
       );
     } catch (err: any) {
+      markOnchainWriteFailure();
       if (ZG_ENABLE_LOCAL_FALLBACK) {
         await writeLocalFallbackValue(address, args.key, args.value);
         return JSON.stringify(
@@ -228,6 +274,14 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
             namespace: address.toLowerCase(),
             fallbackPath: ZG_LOCAL_FALLBACK_PATH,
             warning: `0G write failed: ${err.message}`,
+            storageMode: ZG_STORAGE_MODE,
+            attemptedBackend: attemptDecision.shouldAttempt ? '0g_file' : 'none',
+            selectedBackend: 'local_file',
+            circuitBreaker: {
+              open: isCircuitOpenNow(),
+              consecutiveFailures: writeCircuitState.consecutiveFailures,
+              openUntil: writeCircuitState.openUntil,
+            },
           },
           null,
           2
@@ -248,6 +302,21 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
   ): Promise<string> {
     const address = args.userAddress || (await walletProvider.getAddress());
     try {
+      if (ZG_STORAGE_MODE === 'local_only') {
+        const fallbackValue = await readLocalFallbackValue(address, args.key);
+        if (fallbackValue !== null) {
+          return JSON.stringify({
+            status: 'memory_retrieved',
+            network: ZG_NETWORK,
+            key: args.key,
+            namespace: address.toLowerCase(),
+            backend: 'local_file',
+            fallbackPath: ZG_LOCAL_FALLBACK_PATH,
+            storageMode: ZG_STORAGE_MODE,
+            value: fallbackValue,
+          });
+        }
+      }
       const index = await loadIndex();
       const entry = index.memory[localFallbackMemoryKey(address, args.key)];
       if (!entry) {
@@ -261,6 +330,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
               namespace: address.toLowerCase(),
               backend: 'local_file',
               fallbackPath: ZG_LOCAL_FALLBACK_PATH,
+              storageMode: ZG_STORAGE_MODE,
               value: fallbackValue,
             });
           }
@@ -289,6 +359,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           transactionHash: entry.transactionHash,
           value,
           backend: '0g_file',
+          storageMode: ZG_STORAGE_MODE,
         },
         null,
         2
@@ -307,6 +378,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
               fallbackPath: ZG_LOCAL_FALLBACK_PATH,
               warning: `0G file read failed: ${err.message}`,
               value: fallbackValue,
+              storageMode: ZG_STORAGE_MODE,
             },
             null,
             2
@@ -330,6 +402,10 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgUploadKnowledgeSchema>
   ): Promise<string> {
     try {
+      const attemptDecision = shouldAttemptOnchainWrite();
+      if (!attemptDecision.shouldAttempt) {
+        throw new Error(`0G upload skipped: ${attemptDecision.reason}`);
+      }
       const payload = JSON.stringify(
         {
           kind: 'knowledge',
@@ -344,6 +420,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
         payload,
         `0g-kb-${args.label}`
       );
+      markOnchainWriteSuccess();
       const index = await loadIndex();
       index.knowledge[args.label] = {
         rootHash,
@@ -361,11 +438,13 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           transactionHash,
           contentLength: args.content.length,
           backend: '0g_file',
+          storageMode: ZG_STORAGE_MODE,
         },
         null,
         2
       );
     } catch (err: any) {
+      markOnchainWriteFailure();
       return `Error uploading knowledge: ${err.message}`;
     }
   }
@@ -380,6 +459,14 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgGetKnowledgeSchema>
   ): Promise<string> {
     try {
+      if (ZG_STORAGE_MODE === 'local_only') {
+        return JSON.stringify({
+          status: 'not_found',
+          label: args.label,
+          storageMode: ZG_STORAGE_MODE,
+          note: 'Knowledge lookup is disabled in local_only mode unless uploaded in current runtime.',
+        });
+      }
       const index = await loadIndex();
       const indexEntry = index.knowledge[args.label];
       if (!indexEntry) {
@@ -407,6 +494,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           content,
           verified: true,
           backend: '0g_file',
+          storageMode: ZG_STORAGE_MODE,
         },
         null,
         2

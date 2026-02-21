@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createPublicClient, http, formatEther, formatUnits } from 'viem';
-import { baseSepolia } from 'viem/chains';
+import { sepolia } from 'viem/chains';
 import { ensurePrivyEmbeddedEvmWallet } from '@/lib/privy';
 import { cookies } from 'next/headers';
 
@@ -33,9 +33,19 @@ export async function POST(req: Request) {
     const cookieToken = cookieStore.get('privy-token')?.value;
     const tokenToVerify = accessToken ?? cookieToken;
 
-    const resolvedAddress = tokenToVerify
-      ? (await ensurePrivyEmbeddedEvmWallet(tokenToVerify)).address
-      : null;
+    let resolvedAddress: string | null = null;
+    if (tokenToVerify) {
+      try {
+        resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(tokenToVerify)).address;
+      } catch (firstErr) {
+        // If caller passed an invalid/stale token, fallback to cookie token when available.
+        if (accessToken && cookieToken && accessToken !== cookieToken) {
+          resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(cookieToken)).address;
+        } else {
+          throw firstErr;
+        }
+      }
+    }
     const addressToQuery = (overrideAddress ?? resolvedAddress) as `0x${string}` | null;
 
     if (!addressToQuery) {
@@ -43,15 +53,19 @@ export async function POST(req: Request) {
     }
 
     const client = createPublicClient({
-      chain: baseSepolia,
-      transport: http(process.env.BASE_SEPOLIA_RPC_URL ?? 'https://sepolia.base.org'),
+      chain: sepolia,
+      transport: http(
+        process.env.ETH_SEPOLIA_RPC_URL
+        ?? process.env.BASE_SEPOLIA_RPC_URL
+        ?? 'https://ethereum-sepolia-rpc.publicnode.com'
+      ),
     });
 
     const ethBalanceRaw = await client.getBalance({ address: addressToQuery });
     const eth = formatEther(ethBalanceRaw);
     let usdc = '0';
 
-    const usdcAddress = process.env.USDC_CONTRACT_BASE_SEPOLIA;
+    const usdcAddress = process.env.USDC_CONTRACT_SEPOLIA ?? process.env.USDC_CONTRACT_BASE_SEPOLIA;
     if (usdcAddress) {
       try {
         const [decimals, usdcBalanceRaw] = await Promise.all([

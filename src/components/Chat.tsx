@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
+import { usePrivy } from '@privy-io/react-auth';
 import { SpinningLogo } from './SpinningLogo';
 import { ShieldCheck, Send, Loader2 } from 'lucide-react';
 import Logo from '../image/logo.png';
@@ -13,6 +14,7 @@ interface Message {
 }
 
 export default function Chat() {
+  const { getAccessToken } = usePrivy();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -34,14 +36,16 @@ export default function Chat() {
     setIsLoading(true);
 
     try {
+      const accessToken =
+        (typeof getAccessToken === 'function' ? await getAccessToken() : null)
+        ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMessage,
           history: messages.map(m => ({ role: m.role, content: m.content })),
-          // Include Privy access token if available in localStorage (Privy stores it for the session)
-          accessToken: localStorage.getItem('privy:token') ?? null,
+          accessToken,
         }),
       });
 

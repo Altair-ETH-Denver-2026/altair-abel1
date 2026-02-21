@@ -7,33 +7,37 @@ import { ensurePrivyEmbeddedEvmWallet } from './privy';
 
 type CreateWalletProviderParams = {
   accessToken: string;
-  baseRpcUrl?: string;
+  evmRpcUrl?: string;
 };
 
 export async function createWalletProvider({
   accessToken,
-  baseRpcUrl,
+  evmRpcUrl,
 }: CreateWalletProviderParams) {
   const { walletId } = await ensurePrivyEmbeddedEvmWallet(accessToken);
 
   return PrivyWalletProvider.configureWithWallet({
     appId: process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID ?? '',
     appSecret: process.env.PRIVY_APP_SECRET!,
-    chainId: '84532',
-    rpcUrl: baseRpcUrl ?? process.env.BASE_SEPOLIA_RPC_URL ?? 'https://sepolia.base.org',
+    chainId: '11155111',
+    rpcUrl:
+      evmRpcUrl
+      ?? process.env.ETH_SEPOLIA_RPC_URL
+      ?? process.env.BASE_SEPOLIA_RPC_URL
+      ?? 'https://ethereum-sepolia-rpc.publicnode.com',
     walletId,
   });
 }
 
 type CreateAgentParams = {
   accessToken: string;
-  baseRpcUrl?: string;
+  evmRpcUrl?: string;
 };
 
 type AgentKitInit = NonNullable<Parameters<typeof AgentKit.from>[0]>;
 
-export async function createAgent({ accessToken, baseRpcUrl }: CreateAgentParams) {
-  const walletProvider = await createWalletProvider({ accessToken, baseRpcUrl });
+export async function createAgent({ accessToken, evmRpcUrl }: CreateAgentParams) {
+  const walletProvider = await createWalletProvider({ accessToken, evmRpcUrl });
 
   const agentKit = await AgentKit.from(
     {

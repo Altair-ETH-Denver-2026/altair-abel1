@@ -30,7 +30,10 @@ export async function POST(req: Request) {
     await ensurePrivyEmbeddedEvmWallet(tokenToVerify);
 
     const agentKit = await initAgentKit({
-      baseRpcUrl: process.env.BASE_SEPOLIA_RPC_URL ?? 'https://sepolia.base.org',
+      evmRpcUrl:
+        process.env.ETH_SEPOLIA_RPC_URL
+        ?? process.env.BASE_SEPOLIA_RPC_URL
+        ?? 'https://ethereum-sepolia-rpc.publicnode.com',
       accessToken: tokenToVerify ?? '',
     });
 

@@ -9,15 +9,13 @@ import { z } from 'zod';
 
 const UNISWAP_API_BASE = 'https://trade-api.gateway.uniswap.org/v1';
 const UNISWAP_API_KEY = process.env.UNISWAP_API_KEY!;
-const BASE_CHAIN_ID = 8453;
+const ETH_SEPOLIA_CHAIN_ID = 11155111;
 
-export const BASE_TOKENS = {
+export const ETH_SEPOLIA_TOKENS = {
   ETH: '0x0000000000000000000000000000000000000000',
-  WETH: '0x4200000000000000000000000000000000000006',
-  USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  DAI: '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',
-  USDbC: '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA',
-  cbBTC: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf',
+  WETH: '0xfff9976782d46cc05630d1f6ebab18b2324d6b14',
+  USDC: '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238',
+  DAI: '0x68194a729c2450ad26072b3d33adacbcef39d574',
   PERMIT2: '0x000000000022D473030F116dDEE9F6B43aC78BA3',
 } as const;
 
@@ -137,7 +135,7 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
   @CreateAction({
     name: 'uniswap_get_quote',
     description:
-      'Get a price quote for swapping tokens on Uniswap (Base chain). Returns expected output amount, gas estimate, and routing info.',
+      'Get a price quote for swapping tokens on Uniswap (Ethereum Sepolia testnet). Returns expected output amount, gas estimate, and routing info.',
     schema: UniswapQuoteSchema,
   })
   async getQuote(
@@ -150,8 +148,8 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
       const quoteResponse = await this.api<QuoteResponse>('/quote', {
         tokenIn: args.tokenIn,
         tokenOut: args.tokenOut,
-        tokenInChainId: BASE_CHAIN_ID,
-        tokenOutChainId: BASE_CHAIN_ID,
+        tokenInChainId: ETH_SEPOLIA_CHAIN_ID,
+        tokenOutChainId: ETH_SEPOLIA_CHAIN_ID,
         type: 'EXACT_INPUT',
         amount: args.amount,
         swapper: walletAddress,
@@ -182,7 +180,7 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
   @CreateAction({
     name: 'uniswap_swap',
     description:
-      'Swap tokens on Uniswap via Trading API on Base (8453). Handles approval, quote, Permit2 signing, and execution.',
+      'Swap tokens on Uniswap via Trading API on Ethereum Sepolia (11155111). Handles approval, quote, Permit2 signing, and execution.',
     schema: UniswapSwapSchema,
   })
   async swap(
@@ -196,9 +194,9 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
         walletAddress,
         token: args.tokenIn,
         amount: args.amount,
-        chainId: BASE_CHAIN_ID,
+        chainId: ETH_SEPOLIA_CHAIN_ID,
         tokenOut: args.tokenOut,
-        tokenOutChainId: BASE_CHAIN_ID,
+        tokenOutChainId: ETH_SEPOLIA_CHAIN_ID,
       });
 
       if (approvalResponse.cancel) {
@@ -224,8 +222,8 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
       const quoteResponse = await this.api<QuoteResponse>('/quote', {
         tokenIn: args.tokenIn,
         tokenOut: args.tokenOut,
-        tokenInChainId: BASE_CHAIN_ID,
-        tokenOutChainId: BASE_CHAIN_ID,
+        tokenInChainId: ETH_SEPOLIA_CHAIN_ID,
+        tokenOutChainId: ETH_SEPOLIA_CHAIN_ID,
         type: 'EXACT_INPUT',
         amount: args.amount,
         swapper: walletAddress,
@@ -257,7 +255,7 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
           domain: {
             name: domain.name as string | undefined,
             version: domain.version as string | undefined,
-            chainId: domain.chainId ? Number(domain.chainId) : BASE_CHAIN_ID,
+            chainId: domain.chainId ? Number(domain.chainId) : ETH_SEPOLIA_CHAIN_ID,
             verifyingContract: domain.verifyingContract as `0x${string}` | undefined,
             salt: domain.salt as `0x${string}` | undefined,
           },
@@ -304,7 +302,7 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
             status: 'swap_executed',
             routing: 'CLASSIC',
             transactionHash: txHash,
-            explorer: `https://basescan.org/tx/${txHash}`,
+            explorer: `https://sepolia.etherscan.io/tx/${txHash}`,
             tokenIn: args.tokenIn,
             tokenOut: args.tokenOut,
             amountIn: args.amount,
@@ -341,7 +339,7 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
   }
 
   supportsNetwork = (network: Network): boolean =>
-    network.chainId === String(BASE_CHAIN_ID) || network.networkId === 'base-mainnet';
+    network.chainId === String(ETH_SEPOLIA_CHAIN_ID) || network.networkId === 'ethereum-sepolia';
 }
 
 export const uniswapActionProvider = () => new UniswapActionProvider();

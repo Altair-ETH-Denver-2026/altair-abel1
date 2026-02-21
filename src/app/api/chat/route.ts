@@ -8,10 +8,9 @@ const openai = new OpenAI({
 function tokenAddressFromSymbol(symbol: string): string | null {
   const normalized = symbol.trim().toUpperCase();
   if (normalized === 'ETH') return '0x0000000000000000000000000000000000000000';
-  if (normalized === 'WETH') return '0x4200000000000000000000000000000000000006';
-  if (normalized === 'USDC') return '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-  if (normalized === 'DAI') return '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb';
-  if (normalized === 'CBBTC') return '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf';
+  if (normalized === 'WETH') return '0xfff9976782d46cc05630d1f6ebab18b2324d6b14';
+  if (normalized === 'USDC') return '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238';
+  if (normalized === 'DAI') return '0x68194a729c2450ad26072b3d33adacbcef39d574';
   return null;
 }
 
@@ -54,7 +53,7 @@ export async function POST(req: Request) {
     const { message, history, accessToken } = await req.json();
 
     const systemPrompt = `
-      You are Altair, a DeFi concierge on the Base network. 
+      You are Altair, a DeFi concierge on Ethereum Sepolia testnet. 
       Identify: Sell Token, Buy Token, and Amount.
       If info is missing, ask. If ready, return JSON:
       { "type": "SWAP_INTENT", "sell": "ETH", "buy": "USDC", "amount": 0.1 }
@@ -82,7 +81,10 @@ export async function POST(req: Request) {
       const { createAgent } = await import('@/lib/setup');
       const { actions } = await createAgent({
         accessToken,
-        baseRpcUrl: process.env.BASE_SEPOLIA_RPC_URL ?? 'https://sepolia.base.org',
+        evmRpcUrl:
+          process.env.ETH_SEPOLIA_RPC_URL
+          ?? process.env.BASE_SEPOLIA_RPC_URL
+          ?? 'https://ethereum-sepolia-rpc.publicnode.com',
       });
       return actions as unknown as ActionLike[];
     };

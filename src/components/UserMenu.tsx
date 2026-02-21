@@ -7,7 +7,7 @@ import { useEffect as useClientEffect, useState as useClientState } from 'react'
 import { BALANCE_DECIMALS } from '../../config';
 
 export default function UserMenu() {
-  const { logout, authenticated } = usePrivy();
+  const { logout, authenticated, getAccessToken } = usePrivy();
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isWalletOpen, setIsWalletOpen] = useState(false);
   const [isDevOpen, setIsDevOpen] = useState(false);
@@ -39,7 +39,9 @@ export default function UserMenu() {
         return;
       }
 
-      const token = typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null;
+      const token =
+        (typeof getAccessToken === 'function' ? await getAccessToken() : null)
+        ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
       if (!token) return;
 
       try {
@@ -87,7 +89,9 @@ export default function UserMenu() {
           <div className="absolute right-0 mt-3 w-48 rounded-xl bg-gray-900 border border-gray-700 shadow-2xl z-[100] overflow-hidden flex flex-col">
             <button
               onClick={async () => {
-                const token = typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null;
+                const token =
+                  (typeof getAccessToken === 'function' ? await getAccessToken() : null)
+                  ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
                 await fetch('/api/test-swap', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },

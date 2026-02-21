@@ -1,7 +1,7 @@
 'use client';
 
 import { PrivyProvider } from '@privy-io/react-auth';
-import { base } from 'viem/chains';
+import { sepolia } from 'viem/chains';
 
 export default function Providers({ children }: { children: React.ReactNode }) {
   const appId = process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID;
@@ -20,8 +20,8 @@ export default function Providers({ children }: { children: React.ReactNode }) {
           showWalletLoginFirst: false,
         },
         // This is key: it creates a wallet for email/google users automatically
-        defaultChain: base,
-        supportedChains: [base],
+        defaultChain: sepolia,
+        supportedChains: [sepolia],
       }}
     >
       {children}

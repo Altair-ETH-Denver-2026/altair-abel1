@@ -36,6 +36,11 @@ const privy = new PrivyClient(PRIVY_APP_ID, PRIVY_APP_SECRET, {
 
 const normalizeEvmAddress = (addr: string) => (addr.startsWith('0x') ? addr : `0x${addr}`);
 
+type PrivyWalletListItem = {
+  id: string;
+  address: string;
+};
+
 function extractCandidateEvmAddresses(
   user: Awaited<ReturnType<typeof privy.getUserById>>
 ): string[] {
@@ -70,6 +75,54 @@ async function isWalletSignable(walletId: string): Promise<boolean> {
   }
 }
 
+async function getAllEthereumWallets(): Promise<PrivyWalletListItem[]> {
+  const wallets: PrivyWalletListItem[] = [];
+  let nextCursor: string | undefined;
+
+  do {
+    const page = await privy.walletApi.getWallets({
+      chainType: 'ethereum',
+      cursor: nextCursor,
+    });
+    wallets.push(...((page.data as PrivyWalletListItem[] | undefined) ?? []));
+    nextCursor = page.nextCursor;
+  } while (nextCursor);
+
+  return wallets;
+}
+
+type MatchedWallet = {
+  walletId: string;
+  address: string;
+  signable: boolean;
+};
+
+async function getUserMatchedWallets(accessToken: string): Promise<{
+  userId: string;
+  matches: MatchedWallet[];
+}> {
+  if (!PRIVY_VERIFICATION_KEY) {
+    throw new Error('Missing PRIVY_VERIFICATION_KEY');
+  }
+
+  const claims = await privy.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
+  const user = await privy.getUserById(claims.userId);
+  const candidateAddresses = extractCandidateEvmAddresses(user);
+  const allWallets = await getAllEthereumWallets();
+  const matched = allWallets.filter((w) => candidateAddresses.includes(normalizeEvmAddress(w.address)));
+
+  const matches: MatchedWallet[] = [];
+  for (const wallet of matched) {
+    matches.push({
+      walletId: wallet.id,
+      address: normalizeEvmAddress(wallet.address),
+      signable: await isWalletSignable(wallet.id),
+    });
+  }
+
+  return { userId: claims.userId, matches };
+}
+
 export type PrivySignabilityReport = {
   ok: boolean;
   userId: string;
@@ -83,31 +136,23 @@ export async function getPrivySignabilityReport(accessToken: string): Promise<Pr
     throw new Error('Missing Privy access token');
   }
 
-  if (!PRIVY_VERIFICATION_KEY) {
-    throw new Error('Missing PRIVY_VERIFICATION_KEY');
-  }
-
-  const claims = await privy.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
-  const user = await privy.getUserById(claims.userId);
-  const candidateAddresses = extractCandidateEvmAddresses(user);
-  const { data: wallets } = await privy.walletApi.getWallets({ chainType: 'ethereum' });
-  const matches = wallets?.filter((w) => candidateAddresses.includes(normalizeEvmAddress(w.address))) ?? [];
+  const { userId, matches } = await getUserMatchedWallets(accessToken);
 
   for (const match of matches) {
-    if (await isWalletSignable(match.id)) {
+    if (match.signable) {
       return {
         ok: true,
-        userId: claims.userId,
-        matchedAddress: normalizeEvmAddress(match.address),
-        signableWalletId: match.id,
+        userId,
+        matchedAddress: match.address,
+        signableWalletId: match.walletId,
       };
     }
   }
 
   return {
     ok: false,
-    userId: claims.userId,
-    matchedAddress: matches[0] ? normalizeEvmAddress(matches[0].address) : null,
+    userId,
+    matchedAddress: matches[0]?.address ?? null,
     signableWalletId: null,
     reason:
       matches.length > 0
@@ -139,9 +184,7 @@ export async function getPrivyEvmWalletAddress(accessToken: string): Promise<str
 
   // Fetch app wallets and only accept a strict address match from this user.
   try {
-    const { data: wallets } = await privy.walletApi.getWallets({
-      chainType: 'ethereum',
-    });
+    const wallets = await getAllEthereumWallets();
 
     console.log('[Privy] walletApi wallets for user:', wallets?.map((w) => ({ id: w.id, address: w.address })));
 
@@ -162,6 +205,8 @@ export async function getPrivyEvmWalletAddress(accessToken: string): Promise<str
 
 type EnsurePrivyEmbeddedEvmWalletOptions = {
   requireSignable?: boolean;
+  requestedWalletAddress?: string;
+  requestedWalletId?: string;
 };
 
 export async function ensurePrivyEmbeddedEvmWallet(
@@ -176,60 +221,62 @@ export async function ensurePrivyEmbeddedEvmWallet(
     throw new Error('Missing PRIVY_WALLET_AUTH_PRIVATE_KEY for server-side wallet control');
   }
 
-  const claims = await privy.verifyAuthToken(accessToken, PRIVY_VERIFICATION_KEY);
-  console.log('[Privy] ensure embedded wallet. userId:', claims.userId);
-
-  const user = await privy.getUserById(claims.userId);
-  console.log('[Privy] ensure embedded wallet. linkedAccounts:', user.linkedAccounts?.length ?? 0);
-  console.log('[Privy] ensure embedded wallet. account types:', user.linkedAccounts?.map((a) => a.type));
-
-  const candidateAddresses = extractCandidateEvmAddresses(user);
-
-  // Fetch all app wallets and prefer a signable wallet, but keep a fallback match
-  // so quote/read paths can still resolve wallet address even if signing is currently blocked.
-  const findControllableWallet = async (): Promise<{
-    signable: { walletId: string; address: string } | null;
-    fallback: { walletId: string; address: string } | null;
-  }> => {
-    const { data: wallets } = await privy.walletApi.getWallets({ chainType: 'ethereum' });
-    const matches = wallets?.filter((w) => candidateAddresses.includes(normalizeEvmAddress(w.address))) ?? [];
-    const fallback = matches[0]
-      ? { walletId: matches[0].id, address: normalizeEvmAddress(matches[0].address) }
-      : null;
-    for (const match of matches) {
-      if (await isWalletSignable(match.id)) {
-        return {
-          signable: { walletId: match.id, address: normalizeEvmAddress(match.address) },
-          fallback,
-        };
-      }
-    }
-    return { signable: null, fallback };
-  };
-
+  const { userId, matches } = await getUserMatchedWallets(accessToken);
+  console.log('[Privy] ensure embedded wallet. userId:', userId, 'matched wallets:', matches.length);
   const requireSignable = options?.requireSignable ?? true;
-  const existing = await findControllableWallet();
-  if (existing.signable) {
-    console.log('[Privy] Found controllable embedded EVM wallet:', existing.signable);
-    return existing.signable;
-  }
-  if (existing.fallback) {
-    if (!requireSignable) {
-      console.warn(
-        '[Privy] Matched EVM wallet is not signable with current auth key. ' +
-        `Using fallback walletId ${existing.fallback.walletId} for non-signing operations.`
+  const requestedWalletAddress = options?.requestedWalletAddress
+    ? normalizeEvmAddress(options.requestedWalletAddress)
+    : undefined;
+  const requestedWalletId = options?.requestedWalletId;
+  const hasRequested = Boolean(requestedWalletAddress || requestedWalletId);
+
+  let requestedMatch: MatchedWallet | undefined;
+  if (hasRequested) {
+    requestedMatch = matches.find(
+      (m) =>
+        (requestedWalletId && m.walletId === requestedWalletId)
+        || (requestedWalletAddress && m.address.toLowerCase() === requestedWalletAddress.toLowerCase())
+    );
+    if (!requestedMatch) {
+      throw new Error(
+        'Requested wallet was not found for this user within current app wallet scope. ' +
+        'Use a wallet linked to this Privy user in this app.'
       );
-      return existing.fallback;
+    }
+  }
+
+  if (requestedMatch) {
+    if (!requireSignable || requestedMatch.signable) {
+      return { walletId: requestedMatch.walletId, address: requestedMatch.address };
+    }
+    const backup = matches.find((m) => m.signable && m.walletId !== requestedMatch.walletId);
+    if (backup) {
+      console.warn(
+        `[Privy] Requested wallet ${requestedMatch.address} is not signable; using backup signable wallet ${backup.address}.`
+      );
+      return { walletId: backup.walletId, address: backup.address };
     }
     throw new Error(
-      `Matched EVM wallet ${existing.fallback.address} is not signable with current Privy auth key. ` +
-      'This indicates a wallet/app authorization pairing issue. ' +
-      'Rotate PRIVY_WALLET_AUTH_PRIVATE_KEY (wallet-auth:...) for this app and re-authorize the wallet.'
+      `Requested wallet ${requestedMatch.address} is not signable with current Privy auth key, and no backup signable wallet was found. ` +
+      'Rotate PRIVY_WALLET_AUTH_PRIVATE_KEY (wallet-auth:...) or request a different wallet.'
     );
   }
 
+  const signable = matches.find((m) => m.signable);
+  if (signable) {
+    return { walletId: signable.walletId, address: signable.address };
+  }
+  const fallback = matches[0];
+  if (fallback && !requireSignable) {
+    console.warn(
+      '[Privy] Matched EVM wallet is not signable with current auth key. ' +
+      `Using fallback walletId ${fallback.walletId} for non-signing operations.`
+    );
+    return { walletId: fallback.walletId, address: fallback.address };
+  }
+
   throw new Error(
-    `Unable to find a usable embedded EVM wallet for user ${claims.userId}. ` +
+    `Unable to find a usable embedded EVM wallet for user ${userId}. ` +
     'This usually means PRIVY_WALLET_AUTH_PRIVATE_KEY is missing, invalid, or not authorized for this app wallet.'
   );
 }

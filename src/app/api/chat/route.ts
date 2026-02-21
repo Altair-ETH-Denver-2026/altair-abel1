@@ -43,8 +43,15 @@ type SwapIntent = {
   amount: number;
   sell: string;
   buy: string;
+  requestedWalletAddress?: string;
+  requestedWalletId?: string;
 };
 const pendingSwapBySession = new Map<string, SwapIntent>();
+
+type SelectedWalletInfo = {
+  walletId: string;
+  address: string;
+};
 
 function sessionKeyFromAccessToken(accessToken?: string | null): string {
   if (!accessToken) return 'anonymous';
@@ -76,6 +83,11 @@ function extractSwapIntentFromMessage(message: string): SwapIntent | null {
   const buy = String(match[3]).toUpperCase();
   if (!Number.isFinite(amount) || amount <= 0) return null;
   return { amount, sell, buy };
+}
+
+function extractEvmAddressFromMessage(message: string): string | null {
+  const match = message.match(/\b0x[a-fA-F0-9]{40}\b/);
+  return match ? match[0] : null;
 }
 
 function toObject(value: unknown): Record<string, unknown> | null {
@@ -148,7 +160,14 @@ function extractActionErrorText(value: unknown): string | null {
 
 export async function POST(req: Request) {
   try {
-    const { message, history, accessToken } = await req.json();
+    const body = await req.json();
+    const message = typeof body.message === 'string' ? body.message : '';
+    const history = Array.isArray(body.history) ? body.history : [];
+    const accessToken = typeof body.accessToken === 'string' ? body.accessToken : undefined;
+    const requestedWalletAddressFromBody =
+      typeof body.requestedWalletAddress === 'string' ? body.requestedWalletAddress : undefined;
+    const requestedWalletIdFromBody =
+      typeof body.requestedWalletId === 'string' ? body.requestedWalletId : undefined;
 
     const systemPrompt = `
       You are Altair, a DeFi concierge on Ethereum Sepolia testnet.
@@ -177,17 +196,26 @@ export async function POST(req: Request) {
     let privyPairingWarning: string | null = null;
     const sessionKey = sessionKeyFromAccessToken(accessToken);
 
-    const getActions = async (requireSignable: boolean): Promise<ActionLike[]> => {
-      if (!accessToken) return [];
+    const getActions = async (
+      requireSignable: boolean,
+      requestedWalletAddress?: string,
+      requestedWalletId?: string
+    ): Promise<{ actions: ActionLike[]; selectedWallet?: SelectedWalletInfo }> => {
+      if (!accessToken) return { actions: [] };
       const { createAgent } = await import('@/lib/setup');
-      const { actions } = await createAgent({
+      const { actions, selectedWallet } = await createAgent({
         accessToken,
         evmRpcUrl:
           process.env.ETH_SEPOLIA_RPC_URL
           ?? 'https://ethereum-sepolia-rpc.publicnode.com',
         requireSignable,
+        requestedWalletAddress,
+        requestedWalletId,
       });
-      return actions as unknown as ActionLike[];
+      return {
+        actions: actions as unknown as ActionLike[],
+        selectedWallet,
+      };
     };
 
     const findAction = (actions: ActionLike[], name: string): ActionLike | undefined =>
@@ -216,6 +244,8 @@ export async function POST(req: Request) {
         if (!accessToken) {
           forcedResponse = 'I can prepare that swap, but please connect/sign in first so I can quote and execute it.';
         } else {
+          const requestedWalletAddress = requestedWalletAddressFromBody ?? extractEvmAddressFromMessage(message) ?? undefined;
+          const requestedWalletId = requestedWalletIdFromBody;
           try {
             const { getPrivySignabilityReport } = await import('@/lib/privy');
             const report = await getPrivySignabilityReport(accessToken);
@@ -228,7 +258,7 @@ export async function POST(req: Request) {
             console.warn('Privy signability preflight failed:', privyPreflightErr);
           }
 
-          const actions = await getActions(false);
+          const { actions } = await getActions(false, requestedWalletAddress, requestedWalletId);
           const { amount, sell, buy } = swapIntent;
 
           const tokenIn = tokenAddressFromSymbol(sell);
@@ -253,7 +283,7 @@ export async function POST(req: Request) {
           if (!amountOut) {
             throw new Error(`Quote response missing output amount: ${String(quoteResult)}`);
           }
-          pendingSwapBySession.set(sessionKey, { amount, sell, buy });
+          pendingSwapBySession.set(sessionKey, { amount, sell, buy, requestedWalletAddress, requestedWalletId });
 
           forcedResponse =
             `Estimated quote for swapping ${amount} ${sell} -> ${buy} on Ethereum Sepolia is ` +
@@ -275,7 +305,20 @@ export async function POST(req: Request) {
       const pending = pendingSwapBySession.get(sessionKey);
       if (pending) {
         try {
-          const actions = await getActions(true);
+          const requestedWalletAddress =
+            requestedWalletAddressFromBody
+            ?? extractEvmAddressFromMessage(message)
+            ?? pending.requestedWalletAddress;
+          const requestedWalletId = requestedWalletIdFromBody ?? pending.requestedWalletId;
+          const { actions, selectedWallet } = await getActions(true, requestedWalletAddress, requestedWalletId);
+          const usedBackupWalletNotice =
+            selectedWallet &&
+            ((requestedWalletAddress && selectedWallet.address.toLowerCase() !== requestedWalletAddress.toLowerCase())
+              || (requestedWalletId && selectedWallet.walletId !== requestedWalletId))
+              ? `\n\nRequested wallet ${
+                requestedWalletAddress ?? requestedWalletId
+              } was not signable, so I used backup signable wallet ${selectedWallet.address}.`
+              : '';
           const tokenIn = tokenAddressFromSymbol(pending.sell);
           const tokenOut = tokenAddressFromSymbol(pending.buy);
           if (!tokenIn || !tokenOut) {
@@ -314,12 +357,12 @@ export async function POST(req: Request) {
             pendingSwapBySession.delete(sessionKey);
             forcedResponse =
               `Order submitted for ${pending.amount} ${pending.sell} -> ${pending.buy} on Ethereum Sepolia. ` +
-              'This path is off-chain first and may fill later.';
+              `This path is off-chain first and may fill later.${usedBackupWalletNotice}`;
           } else if (swapTx) {
             pendingSwapBySession.delete(sessionKey);
             forcedResponse =
               `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}. ` +
-              `Tx: ${swapTx}`;
+              `Tx: ${swapTx}${usedBackupWalletNotice}`;
           } else {
             throw new Error(
               `Swap action returned no transaction hash. Raw result: ${
@@ -342,7 +385,7 @@ export async function POST(req: Request) {
     // Automatically persist chat and trade context to 0G per-user memory.
     if (accessToken) {
       try {
-        const actions = await getActions(false);
+        const { actions } = await getActions(false);
         const saveMemoryAction = findStorageSaveAction(actions);
         if (!saveMemoryAction) {
           const available = actions.map((a) => a.name ?? '(unnamed)').join(', ');

@@ -9,16 +9,24 @@ type CreateWalletProviderParams = {
   accessToken: string;
   evmRpcUrl?: string;
   requireSignable?: boolean;
+  requestedWalletAddress?: string;
+  requestedWalletId?: string;
 };
 
 export async function createWalletProvider({
   accessToken,
   evmRpcUrl,
   requireSignable,
+  requestedWalletAddress,
+  requestedWalletId,
 }: CreateWalletProviderParams) {
-  const { walletId } = await ensurePrivyEmbeddedEvmWallet(accessToken, { requireSignable });
+  const selectedWallet = await ensurePrivyEmbeddedEvmWallet(accessToken, {
+    requireSignable,
+    requestedWalletAddress,
+    requestedWalletId,
+  });
 
-  return PrivyWalletProvider.configureWithWallet({
+  const walletProvider = await PrivyWalletProvider.configureWithWallet({
     appId: process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID ?? '',
     appSecret: process.env.PRIVY_APP_SECRET!,
     chainId: '11155111',
@@ -26,20 +34,36 @@ export async function createWalletProvider({
       evmRpcUrl
       ?? process.env.ETH_SEPOLIA_RPC_URL
       ?? 'https://ethereum-sepolia-rpc.publicnode.com',
-    walletId,
+    walletId: selectedWallet.walletId,
   });
+
+  return { walletProvider, selectedWallet };
 }
 
 type CreateAgentParams = {
   accessToken: string;
   evmRpcUrl?: string;
   requireSignable?: boolean;
+  requestedWalletAddress?: string;
+  requestedWalletId?: string;
 };
 
 type AgentKitInit = NonNullable<Parameters<typeof AgentKit.from>[0]>;
 
-export async function createAgent({ accessToken, evmRpcUrl, requireSignable }: CreateAgentParams) {
-  const walletProvider = await createWalletProvider({ accessToken, evmRpcUrl, requireSignable });
+export async function createAgent({
+  accessToken,
+  evmRpcUrl,
+  requireSignable,
+  requestedWalletAddress,
+  requestedWalletId,
+}: CreateAgentParams) {
+  const { walletProvider, selectedWallet } = await createWalletProvider({
+    accessToken,
+    evmRpcUrl,
+    requireSignable,
+    requestedWalletAddress,
+    requestedWalletId,
+  });
 
   const agentKit = await AgentKit.from(
     {
@@ -53,5 +77,5 @@ export async function createAgent({ accessToken, evmRpcUrl, requireSignable }: C
   );
 
   const actions = agentKit.getActions();
-  return { agentKit, walletProvider, actions };
+  return { agentKit, walletProvider, actions, selectedWallet };
 }

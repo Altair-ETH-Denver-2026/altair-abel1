@@ -20,6 +20,11 @@ const ZG_STREAM_ID =
   process.env.ZG_STREAM_ID ||
   '0x0000000000000000000000000000000000000000000000000000000000000000';
 const ZG_NETWORK = process.env.ZG_NETWORK || 'testnet';
+const ZG_KV_RPC_FALLBACKS = (process.env.ZG_KV_RPC_FALLBACKS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ZG_KV_TIMEOUT_MS = Number(process.env.ZG_KV_TIMEOUT_MS ?? 5000);
 
 const ZgSaveMemorySchema = z.object({
   key: z.string().describe('Memory key, e.g. preferences or risk_tolerance.'),
@@ -58,6 +63,39 @@ function userKey(address: string, key: string): Uint8Array {
 
 function kbIndexKey(label: string): Uint8Array {
   return Uint8Array.from(Buffer.from(`kb:${label}`, 'utf-8'));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return await Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
+}
+
+async function readKvValueWithFallback(
+  streamId: string,
+  key: Uint8Array
+): Promise<{ value: Awaited<ReturnType<KvClient['getValue']>>; endpoint: string }> {
+  const endpoints = [ZG_KV_RPC, ...ZG_KV_RPC_FALLBACKS];
+  let lastErr: unknown = null;
+
+  for (const endpoint of endpoints) {
+    try {
+      const kvClient = new KvClient(endpoint);
+      const value = await withTimeout(kvClient.getValue(streamId, key), ZG_KV_TIMEOUT_MS);
+      return { value, endpoint };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw new Error(
+    `All KV endpoints failed (${endpoints.join(', ')}): ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`
+  );
 }
 
 class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
@@ -120,14 +158,17 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
   ): Promise<string> {
     try {
       const address = args.userAddress || (await walletProvider.getAddress());
-      const kvClient = new KvClient(ZG_KV_RPC);
-      const value = await kvClient.getValue(ZG_STREAM_ID, userKey(address, args.key));
+      const { value, endpoint } = await readKvValueWithFallback(
+        ZG_STREAM_ID,
+        userKey(address, args.key)
+      );
 
       if (!value || !value.data) {
         return JSON.stringify({
           status: 'not_found',
           key: args.key,
           namespace: address.toLowerCase(),
+          kvEndpoint: endpoint,
         });
       }
 
@@ -138,6 +179,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           network: ZG_NETWORK,
           key: args.key,
           namespace: address.toLowerCase(),
+          kvEndpoint: endpoint,
           value: decoded,
         },
         null,
@@ -237,12 +279,14 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
   ): Promise<string> {
     try {
       const indexer = new Indexer(ZG_INDEXER_RPC);
-      const kvClient = new KvClient(ZG_KV_RPC);
 
       let indexEntry: any;
 
       try {
-        const kvResult = await kvClient.getValue(ZG_STREAM_ID, kbIndexKey(args.label));
+        const { value: kvResult } = await readKvValueWithFallback(
+          ZG_STREAM_ID,
+          kbIndexKey(args.label)
+        );
         if (!kvResult || !kvResult.data) {
           return JSON.stringify({ status: 'not_found', label: args.label });
         }

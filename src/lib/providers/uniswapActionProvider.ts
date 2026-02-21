@@ -154,10 +154,16 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
         amount: args.amount,
         swapper: walletAddress,
         slippageTolerance: args.slippageTolerance,
-        protocols: ['V2', 'V3', 'V4', 'DUTCH_V2', 'DUTCH_V3'],
+        protocols: ['V2', 'V3', 'V4'],
       });
 
       const quote = quoteResponse.quote;
+      const amountOut =
+        quote?.quote ??
+        quote?.amountOut ??
+        quote?.outputAmount ??
+        quote?.output_amount ??
+        quote?.output?.amount;
       return JSON.stringify(
         {
           status: 'quote_received',
@@ -166,8 +172,9 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
           tokenIn: args.tokenIn,
           tokenOut: args.tokenOut,
           amountIn: args.amount,
-          amountOut: quote?.quote ?? quote?.amountOut ?? 'unknown',
+          amountOut: amountOut ?? null,
           gasEstimate: quote?.gasFee ?? 'unknown',
+          rawQuote: quote,
         },
         null,
         2
@@ -228,7 +235,7 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
         amount: args.amount,
         swapper: walletAddress,
         slippageTolerance: args.slippageTolerance,
-        protocols: ['V2', 'V3', 'V4', 'DUTCH_V2', 'DUTCH_V3'],
+        protocols: ['V2', 'V3', 'V4'],
       });
 
       if (!quoteResponse.quote) {
@@ -296,12 +303,18 @@ class UniswapActionProvider extends ActionProvider<EvmWalletProvider> {
             maxPriorityFeePerGas: BigInt(swapResponse.swap.maxPriorityFeePerGas),
           }),
         });
+        const receipt = await walletProvider.waitForTransactionReceipt(txHash);
+        if (!receipt || (typeof receipt.status === 'string' && receipt.status !== 'success')
+          || (typeof receipt.status === 'number' && receipt.status !== 1)) {
+          return `Swap transaction reverted or not confirmed. txHash: ${txHash}`;
+        }
 
         return JSON.stringify(
           {
             status: 'swap_executed',
             routing: 'CLASSIC',
             transactionHash: txHash,
+            receiptStatus: receipt.status,
             explorer: `https://sepolia.etherscan.io/tx/${txHash}`,
             tokenIn: args.tokenIn,
             tokenOut: args.tokenOut,

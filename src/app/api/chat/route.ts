@@ -14,10 +14,24 @@ function tokenAddressFromSymbol(symbol: string): string | null {
   return null;
 }
 
+const TOKEN_DECIMALS: Record<string, number> = {
+  ETH: 18,
+  WETH: 18,
+  USDC: 6,
+  DAI: 18,
+};
+
 function toSmallestUnit(amount: number, symbol: string): string {
-  const decimals = symbol.trim().toUpperCase() === 'USDC' ? 6 : 18;
+  const decimals = TOKEN_DECIMALS[symbol.trim().toUpperCase()] ?? 18;
   const scaled = Math.floor(amount * 10 ** decimals);
   return String(scaled);
+}
+
+function fromSmallestUnit(amount: string, symbol: string): string {
+  const decimals = TOKEN_DECIMALS[symbol.trim().toUpperCase()] ?? 18;
+  const normalized = Number(amount) / 10 ** decimals;
+  if (!Number.isFinite(normalized)) return amount;
+  return normalized.toFixed(Math.min(decimals, 6)).replace(/\.?0+$/, '');
 }
 
 type ActionLike = {
@@ -64,12 +78,33 @@ function toObject(value: unknown): Record<string, unknown> | null {
 
 function extractTxHash(value: unknown): string | null {
   const parsed = toObject(value);
-  const txHash = parsed?.transactionHash;
+  const txHash = parsed?.transactionHash ?? parsed?.txHash ?? parsed?.hash;
   return typeof txHash === 'string' ? txHash : null;
+}
+
+function extractQuoteAmountOut(value: unknown): string | null {
+  const parsed = toObject(value);
+  if (!parsed) return null;
+  const direct =
+    parsed.amountOut ??
+    parsed.quoteAmountOut ??
+    parsed.expectedAmountOut ??
+    (parsed.quote as Record<string, unknown> | undefined)?.amountOut ??
+    (parsed.quote as Record<string, unknown> | undefined)?.quote ??
+    ((parsed.quote as Record<string, unknown> | undefined)?.output as Record<string, unknown> | undefined)
+      ?.amount;
+
+  return typeof direct === 'string' || typeof direct === 'number' ? String(direct) : null;
 }
 
 function sanitizeAssistantReply(text: string): string {
   return text.replace(/```[\s\S]*?```/g, '').trim();
+}
+
+function extractSwapStatus(value: unknown): string | null {
+  const parsed = toObject(value);
+  const status = parsed?.status;
+  return typeof status === 'string' ? status : null;
 }
 
 function isSwapConfirmationMessage(message: string): boolean {
@@ -129,8 +164,7 @@ export async function POST(req: Request) {
 
     const findStorageSaveAction = (actions: ActionLike[]): ActionLike | undefined =>
       findAction(actions, 'zg_storage_save_memory')
-      ?? actions.find((a) => a.name?.toLowerCase().includes('save_memory'))
-      ?? actions.find((a) => a.name?.toLowerCase().includes('zg_storage'));
+      ?? actions.find((a) => a.name?.toLowerCase().includes('save_memory'));
 
     // Step 1: quote when swap intent appears.
     const swapIntent = extractSwapIntentFromMessage(message);
@@ -160,17 +194,15 @@ export async function POST(req: Request) {
             amount: toSmallestUnit(amount, sell),
             slippageTolerance: 0.5,
           });
-          const quoteObj = toObject(quoteResult);
-          const amountOut =
-            quoteObj?.amountOut
-            ?? quoteObj?.quoteAmountOut
-            ?? quoteObj?.expectedAmountOut
-            ?? 'unknown';
+          const amountOut = extractQuoteAmountOut(quoteResult);
+          if (!amountOut) {
+            throw new Error(`Quote response missing output amount: ${String(quoteResult)}`);
+          }
           pendingSwapBySession.set(sessionKey, { amount, sell, buy });
 
           forcedResponse =
             `Estimated quote for swapping ${amount} ${sell} -> ${buy} on Ethereum Sepolia is ` +
-            `${amountOut} ${buy} (subject to slippage/market movement). ` +
+            `${fromSmallestUnit(amountOut, buy)} ${buy} (subject to slippage/market movement). ` +
             `Reply "confirm swap" to proceed.`;
         }
       } catch (intentErr) {
@@ -217,10 +249,21 @@ export async function POST(req: Request) {
             result,
             createdAt: new Date().toISOString(),
           };
+          const swapStatus = extractSwapStatus(result);
           const swapTx = extractTxHash(result);
-          forcedResponse = swapTx
-            ? `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}. Tx: ${swapTx}`
-            : `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}.`;
+          if (swapStatus === 'order_submitted') {
+            forcedResponse =
+              `Order submitted for ${pending.amount} ${pending.sell} -> ${pending.buy} on Ethereum Sepolia. ` +
+              'This path is off-chain first and may fill later.';
+          } else if (swapTx) {
+            forcedResponse =
+              `Swap submitted on Ethereum Sepolia for ${pending.amount} ${pending.sell} -> ${pending.buy}. ` +
+              `Tx: ${swapTx}`;
+          } else {
+            forcedResponse =
+              `Swap requested for ${pending.amount} ${pending.sell} -> ${pending.buy}, ` +
+              'but no transaction hash was returned. I did not confirm on-chain execution.';
+          }
         } catch (swapErr) {
           console.warn('Swap execution failed:', swapErr);
           forcedResponse =

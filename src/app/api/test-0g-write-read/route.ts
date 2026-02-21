@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
+import { ethers } from 'ethers';
 
 type ActionLike = {
   name?: string;
@@ -60,12 +61,41 @@ export async function POST(req: Request) {
     const payload = { ping: true, at: new Date().toISOString() };
     const writeRaw = await saveMemory.invoke({ key, value: JSON.stringify(payload) });
     const readRaw = await getMemory.invoke({ key });
+    const parsedWrite = parseResult(writeRaw);
+    const parsedRead = parseResult(readRaw);
+
+    const writeRawText =
+      parsedWrite && typeof parsedWrite.raw === 'string' ? parsedWrite.raw : '';
+    const diagnostics =
+      writeRawText.includes('execution reverted')
+        ? await (async () => {
+          try {
+            const provider = new ethers.JsonRpcProvider(
+              process.env.ZG_RPC_URL ?? 'https://evmrpc-testnet.0g.ai/'
+            );
+            const chainId = (await provider.getNetwork()).chainId.toString();
+            const address = process.env.ZG_ADDRESS ?? null;
+            const balance = address ? ethers.formatEther(await provider.getBalance(address)) : null;
+            return {
+              chainId,
+              zgAddress: address,
+              zgBalance: balance,
+              note: 'Write reverted on-chain at flow.submit; this is not a local route crash.',
+            };
+          } catch (diagErr) {
+            return {
+              note: diagErr instanceof Error ? diagErr.message : 'Failed to collect diagnostics',
+            };
+          }
+        })()
+        : null;
 
     return NextResponse.json({
       ok: true,
       key,
-      write: parseResult(writeRaw),
-      read: parseResult(readRaw),
+      write: parsedWrite,
+      read: parsedRead,
+      diagnostics,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unexpected error';

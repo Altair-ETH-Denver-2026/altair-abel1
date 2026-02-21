@@ -189,13 +189,19 @@ export async function POST(req: Request) {
     };
 
     const findAction = (actions: ActionLike[], name: string): ActionLike | undefined =>
-      actions.find((a) => a.name === name);
+      actions.find((a) => a.name?.trim().toLowerCase() === name.toLowerCase());
     const findQuoteAction = (actions: ActionLike[]): ActionLike | undefined =>
       findAction(actions, 'uniswap_get_quote')
-      ?? actions.find((a) => a.name?.toLowerCase().includes('quote'));
+      ?? actions.find((a) => {
+        const n = a.name?.toLowerCase() ?? '';
+        return n.includes('uniswap') && n.includes('quote');
+      });
     const findSwapAction = (actions: ActionLike[]): ActionLike | undefined =>
       findAction(actions, 'uniswap_swap')
-      ?? actions.find((a) => a.name?.toLowerCase().includes('swap'));
+      ?? actions.find((a) => {
+        const n = a.name?.toLowerCase() ?? '';
+        return n.includes('uniswap') && n.includes('swap') && !n.includes('quote');
+      });
 
     const findStorageSaveAction = (actions: ActionLike[]): ActionLike | undefined =>
       findAction(actions, 'zg_storage_save_memory')

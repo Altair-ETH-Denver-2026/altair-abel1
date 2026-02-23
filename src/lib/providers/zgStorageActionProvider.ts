@@ -37,11 +37,13 @@ const ZgSaveMemorySchema = z.object({
   key: z.string().describe('Memory key, e.g. preferences or risk_tolerance.'),
   value: z.string().describe('JSON string content for this memory key.'),
   userAddress: z.string().optional().describe("Optional user address; defaults to connected wallet's."),
+  userId: z.string().optional().describe('Optional Privy user ID for per-user namespacing.'),
 });
 
 const ZgGetMemorySchema = z.object({
   key: z.string().describe('Memory key to retrieve.'),
   userAddress: z.string().optional().describe('Optional wallet namespace override.'),
+  userId: z.string().optional().describe('Optional Privy user ID for per-user namespacing.'),
 });
 
 const ZgUploadKnowledgeSchema = z.object({
@@ -63,8 +65,15 @@ function getEthersSigner(): ethers.Wallet {
   return new ethers.Wallet(ZG_PRIVATE_KEY, provider);
 }
 
-function localFallbackMemoryKey(address: string, key: string): string {
-  return `user:${address.toLowerCase()}:${key}`;
+function composeMemoryNamespace(address: string, userId?: string): string {
+  const wallet = address.toLowerCase();
+  const normalizedUserId = userId?.trim();
+  if (!normalizedUserId) return wallet;
+  return `privy:${normalizedUserId}:wallet:${wallet}`;
+}
+
+function localFallbackMemoryKey(namespace: string, key: string): string {
+  return `user:${namespace}:${key}`;
 }
 
 async function loadLocalFallbackStore(): Promise<Record<string, string>> {
@@ -81,19 +90,29 @@ async function loadLocalFallbackStore(): Promise<Record<string, string>> {
 }
 
 async function writeLocalFallbackValue(
-  address: string,
+  namespace: string,
   key: string,
   value: string
 ): Promise<void> {
   const store = await loadLocalFallbackStore();
-  store[localFallbackMemoryKey(address, key)] = value;
+  store[localFallbackMemoryKey(namespace, key)] = value;
   await fs.mkdir(path.dirname(ZG_LOCAL_FALLBACK_PATH), { recursive: true });
   await fs.writeFile(ZG_LOCAL_FALLBACK_PATH, JSON.stringify(store, null, 2), 'utf-8');
 }
 
-async function readLocalFallbackValue(address: string, key: string): Promise<string | null> {
+async function readLocalFallbackValue(
+  namespace: string,
+  key: string,
+  legacyWalletNamespace?: string
+): Promise<string | null> {
   const store = await loadLocalFallbackStore();
-  return store[localFallbackMemoryKey(address, key)] ?? null;
+  const primary = store[localFallbackMemoryKey(namespace, key)];
+  if (typeof primary === 'string') return primary;
+  if (legacyWalletNamespace && legacyWalletNamespace !== namespace) {
+    const legacy = store[localFallbackMemoryKey(legacyWalletNamespace, key)];
+    if (typeof legacy === 'string') return legacy;
+  }
+  return null;
 }
 
 type StorageIndex = {
@@ -234,6 +253,8 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgSaveMemorySchema>
   ): Promise<string> {
     const address = args.userAddress || (await walletProvider.getAddress());
+    const walletNamespace = address.toLowerCase();
+    const namespace = composeMemoryNamespace(address, args.userId);
     const attemptDecision = shouldAttemptOnchainWrite();
     try {
       if (!attemptDecision.shouldAttempt) {
@@ -242,7 +263,9 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
       const payload = JSON.stringify(
         {
           kind: 'memory',
-          namespace: address.toLowerCase(),
+          namespace,
+          userId: args.userId ?? null,
+          walletAddress: walletNamespace,
           key: args.key,
           value: args.value,
           updatedAt: new Date().toISOString(),
@@ -256,7 +279,7 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
       );
       markOnchainWriteSuccess();
       const index = await loadIndex();
-      index.memory[localFallbackMemoryKey(address, args.key)] = {
+      index.memory[localFallbackMemoryKey(namespace, args.key)] = {
         rootHash,
         transactionHash,
         updatedAt: new Date().toISOString(),
@@ -268,7 +291,9 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           status: 'memory_saved',
           network: ZG_NETWORK,
           key: args.key,
-          namespace: address.toLowerCase(),
+          namespace,
+          userId: args.userId ?? null,
+          walletAddress: walletNamespace,
           rootHash,
           transactionHash,
           valueSizeBytes: Buffer.byteLength(args.value, 'utf-8'),
@@ -285,13 +310,15 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     } catch (err: any) {
       markOnchainWriteFailure();
       if (ZG_ENABLE_LOCAL_FALLBACK) {
-        await writeLocalFallbackValue(address, args.key, args.value);
+        await writeLocalFallbackValue(namespace, args.key, args.value);
         return JSON.stringify(
           {
             status: 'memory_saved_fallback',
             backend: 'local_file',
             key: args.key,
-            namespace: address.toLowerCase(),
+            namespace,
+            userId: args.userId ?? null,
+            walletAddress: walletNamespace,
             fallbackPath: ZG_LOCAL_FALLBACK_PATH,
             warning: `0G write failed: ${err.message}`,
             storageMode: ZG_STORAGE_MODE,
@@ -321,15 +348,19 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
     args: z.infer<typeof ZgGetMemorySchema>
   ): Promise<string> {
     const address = args.userAddress || (await walletProvider.getAddress());
+    const walletNamespace = address.toLowerCase();
+    const namespace = composeMemoryNamespace(address, args.userId);
     try {
       if (ZG_STORAGE_MODE === 'local_only') {
-        const fallbackValue = await readLocalFallbackValue(address, args.key);
+        const fallbackValue = await readLocalFallbackValue(namespace, args.key, walletNamespace);
         if (fallbackValue !== null) {
           return JSON.stringify({
             status: 'memory_retrieved',
             network: ZG_NETWORK,
             key: args.key,
-            namespace: address.toLowerCase(),
+            namespace,
+            userId: args.userId ?? null,
+            walletAddress: walletNamespace,
             backend: 'local_file',
             fallbackPath: ZG_LOCAL_FALLBACK_PATH,
             storageMode: ZG_STORAGE_MODE,
@@ -338,16 +369,20 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
         }
       }
       const index = await loadIndex();
-      const entry = index.memory[localFallbackMemoryKey(address, args.key)];
+      const entry =
+        index.memory[localFallbackMemoryKey(namespace, args.key)]
+        ?? index.memory[localFallbackMemoryKey(walletNamespace, args.key)];
       if (!entry) {
         if (ZG_ENABLE_LOCAL_FALLBACK) {
-          const fallbackValue = await readLocalFallbackValue(address, args.key);
+          const fallbackValue = await readLocalFallbackValue(namespace, args.key, walletNamespace);
           if (fallbackValue !== null) {
             return JSON.stringify({
               status: 'memory_retrieved',
               network: ZG_NETWORK,
               key: args.key,
-              namespace: address.toLowerCase(),
+              namespace,
+              userId: args.userId ?? null,
+              walletAddress: walletNamespace,
               backend: 'local_file',
               fallbackPath: ZG_LOCAL_FALLBACK_PATH,
               storageMode: ZG_STORAGE_MODE,
@@ -358,7 +393,9 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
         return JSON.stringify({
           status: 'not_found',
           key: args.key,
-          namespace: address.toLowerCase(),
+          namespace,
+          userId: args.userId ?? null,
+          walletAddress: walletNamespace,
         });
       }
       const raw = await downloadContentFrom0g(entry.rootHash);
@@ -374,7 +411,9 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
           status: 'memory_retrieved',
           network: ZG_NETWORK,
           key: args.key,
-          namespace: address.toLowerCase(),
+          namespace,
+          userId: args.userId ?? null,
+          walletAddress: walletNamespace,
           rootHash: entry.rootHash,
           transactionHash: entry.transactionHash,
           value,
@@ -386,14 +425,16 @@ class ZgStorageActionProvider extends ActionProvider<EvmWalletProvider> {
       );
     } catch (err: any) {
       if (ZG_ENABLE_LOCAL_FALLBACK) {
-        const fallbackValue = await readLocalFallbackValue(address, args.key);
+        const fallbackValue = await readLocalFallbackValue(namespace, args.key, walletNamespace);
         if (fallbackValue !== null) {
           return JSON.stringify(
             {
               status: 'memory_retrieved',
               network: ZG_NETWORK,
               key: args.key,
-              namespace: address.toLowerCase(),
+              namespace,
+              userId: args.userId ?? null,
+              walletAddress: walletNamespace,
               backend: 'local_file',
               fallbackPath: ZG_LOCAL_FALLBACK_PATH,
               warning: `0G file read failed: ${err.message}`,

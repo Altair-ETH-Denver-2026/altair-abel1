@@ -394,6 +394,7 @@ export async function POST(req: Request) {
 
         const summaryResult = await saveMemoryAction.invoke({
           key: 'chat_summary_latest',
+          userId: sessionKey,
           value: JSON.stringify({
             userMessage: message,
             aiResponse: forcedResponse ?? aiResponse,

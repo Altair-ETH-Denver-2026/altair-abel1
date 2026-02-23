@@ -27,6 +27,8 @@ export async function initAgentKit({ evmRpcUrl, accessToken }: InitAgentKitParam
   const walletProvider = await PrivyWalletProvider.configureWithWallet({
     appId: process.env.NEXT_PUBLIC_PRIVY_APP_ID ?? process.env.PRIVY_APP_ID ?? '',
     appSecret: process.env.PRIVY_APP_SECRET ?? '',
+    authorizationPrivateKey: process.env.PRIVY_WALLET_AUTH_PRIVATE_KEY,
+    authorizationKeyId: process.env.PRIVY_WALLET_AUTH_ID,
     chainId: '11155111',
     rpcUrl: evmRpcUrl,
     walletId,

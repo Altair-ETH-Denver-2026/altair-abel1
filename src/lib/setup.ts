@@ -31,6 +31,8 @@ export async function createWalletProvider({
     appSecret: process.env.PRIVY_APP_SECRET!,
     authorizationPrivateKey: process.env.PRIVY_WALLET_AUTH_PRIVATE_KEY,
     authorizationKeyId: process.env.PRIVY_WALLET_AUTH_ID,
+    walletType: 'embedded',
+    chainType: 'ethereum',
     chainId: '11155111',
     rpcUrl:
       evmRpcUrl

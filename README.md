@@ -50,6 +50,15 @@ Related controls:
 - `ZG_LOCAL_FALLBACK_PATH` (default `.cache/zg-memory-fallback.json`)
 - `ZG_LOCAL_INDEX_PATH` (default `.cache/zg-storage-index.json`)
 
+### 0G SDK patch (Galileo testnet)
+
+The npm package `@0glabs/0g-ts-sdk` (v0.3.3) ships an ABI that does not match the current 0G Galileo testnet contract: the on-chain `Submission` struct includes an `address submitter` field. We apply a post-install patch so `flow.submit` uses the correct selector (`0xbc8c11f8`).
+
+- **Automatic:** `postinstall` runs `scripts/patch-0g-sdk.js` after every `yarn` or `npm install`.
+- **Manual:** `yarn patch:0g` or `npm run patch:0g` to re-run the patch (e.g. after reinstalling the SDK).
+
+Patch reference: [MattWong-ca/ethdenver-2026](https://github.com/MattWong-ca/ethdenver-2026/blob/main/templates/storage/scripts/patch-0g-sdk.js).
+
 ## Diagnostics
 
 Preflight health endpoint:
@@ -66,4 +75,4 @@ Low-level flow submit diagnostics script:
 corepack yarn diag:0g-submit
 ```
 
-This script captures chain/indexer/node context and submit/upload failure details for debugging `flow.submit` reverts.
+This script captures chain/indexer/node context and submit/upload failure details for debugging `flow.submit` reverts. After applying the 0G SDK patch (see above), submits should succeed on Galileo testnet.

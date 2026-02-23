@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "postinstall": "node scripts/patch-0g-sdk.js",
+    "patch:0g": "node scripts/patch-0g-sdk.js",
     "diag:0g-submit": "node scripts/diagnose-0g-submit.js"
   },
   "dependencies": {

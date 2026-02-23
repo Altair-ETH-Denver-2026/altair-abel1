@@ -16,16 +16,14 @@ export async function POST(req: Request) {
 
     const report = await getPrivySignabilityReport(accessToken, { ensureSignable: true });
     if (!report.ok) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: report.reason ?? 'Unable to establish a signable wallet',
-          userId: report.userId,
-          matchedAddress: report.matchedAddress,
-          signableWalletId: report.signableWalletId,
-        },
-        { status: 409 }
-      );
+      // Return 200 so clients can read body without network "failed"; they check ok.
+      return NextResponse.json({
+        ok: false,
+        error: report.reason ?? 'Unable to establish a signable wallet',
+        userId: report.userId,
+        matchedAddress: report.matchedAddress,
+        signableWalletId: report.signableWalletId,
+      });
     }
 
     const selected = await ensurePrivyEmbeddedEvmWallet(accessToken, {

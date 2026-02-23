@@ -33,20 +33,24 @@ export async function POST(req: Request) {
     const cookieToken = cookieStore.get('privy-token')?.value;
     const tokenToVerify = accessToken ?? cookieToken;
 
+    // Resolve wallet for balance display; do not require signable (show balance for any linked wallet).
     let resolvedAddress: string | null = null;
     if (tokenToVerify) {
       try {
-        resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(tokenToVerify)).address;
+        resolvedAddress = (
+          await ensurePrivyEmbeddedEvmWallet(tokenToVerify, { requireSignable: false })
+        ).address;
       } catch (firstErr) {
         console.warn('Embedded wallet resolution failed, trying address-only fallback:', firstErr);
         try {
           resolvedAddress = await getPrivyEvmWalletAddress(tokenToVerify);
         } catch (secondErr) {
           console.warn('Address-only fallback failed:', secondErr);
-          // If caller passed an invalid/stale token, try cookie token as a final fallback.
           if (accessToken && cookieToken && accessToken !== cookieToken) {
             try {
-              resolvedAddress = (await ensurePrivyEmbeddedEvmWallet(cookieToken)).address;
+              resolvedAddress = (
+                await ensurePrivyEmbeddedEvmWallet(cookieToken, { requireSignable: false })
+              ).address;
             } catch (thirdErr) {
               console.warn('Cookie embedded wallet fallback failed:', thirdErr);
               try {

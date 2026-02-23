@@ -31,7 +31,7 @@ export default function UserMenu() {
   useClientEffect(() => {
     const controller = new AbortController();
 
-    const run = async () => {
+    const run = async (retryCount = 0) => {
       if (!authenticated) {
         setEthBalance('0');
         setUsdcBalance('0');
@@ -39,9 +39,16 @@ export default function UserMenu() {
         return;
       }
 
-      const token =
+      let token =
         (typeof getAccessToken === 'function' ? await getAccessToken() : null)
         ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
+      // Privy may not have token ready immediately after authenticated; retry once.
+      if (!token && retryCount < 1) {
+        await new Promise((r) => setTimeout(r, 500));
+        token =
+          (typeof getAccessToken === 'function' ? await getAccessToken() : null)
+          ?? (typeof window !== 'undefined' ? localStorage.getItem('privy:token') : null);
+      }
       if (!token) return;
 
       try {
@@ -55,10 +62,10 @@ export default function UserMenu() {
 
         const data = await res.json();
         if (!res.ok) {
-          throw new Error(data?.error || 'Failed to fetch balances');
+          throw new Error(data?.error || data?.warning || 'Failed to fetch balances');
         }
-        if (data?.eth) setEthBalance(data.eth);
-        if (data?.usdc) setUsdcBalance(data.usdc);
+        if (data?.eth !== undefined) setEthBalance(data.eth);
+        if (data?.usdc !== undefined) setUsdcBalance(data.usdc);
         if (data?.address) setEvmAddress(data.address);
       } catch {
         setEthBalance('0');
@@ -67,7 +74,7 @@ export default function UserMenu() {
       }
     };
 
-    run();
+    run(0);
 
     return () => controller.abort();
   }, [authenticated, setEthBalance, setUsdcBalance, setEvmAddress]);

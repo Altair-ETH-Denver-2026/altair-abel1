@@ -403,6 +403,12 @@ export async function POST(req: Request) {
         });
         zgTxHash = extractTxHash(summaryResult) ?? zgTxHash;
 
+        // Surface fallback so UI shows "0G upload failed" instead of silent no-link.
+        const parsed = toObject(summaryResult);
+        if (parsed?.status === 'memory_saved_fallback' && parsed?.warning) {
+          zgError = typeof parsed.warning === 'string' ? parsed.warning : 'Saved locally; 0G upload unavailable.';
+        }
+
         // Temporarily disable per-trade memory writes to reduce 0G write attempts.
         // Swap context is still reflected in chat_summary_latest via hadSwapExecution.
       } catch (storageErr) {

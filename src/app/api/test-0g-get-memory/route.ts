@@ -6,6 +6,18 @@ type ActionLike = {
   invoke: (args: Record<string, unknown>) => Promise<unknown>;
 };
 
+function sessionKeyFromAccessToken(accessToken?: string | null): string {
+  if (!accessToken) return 'anonymous';
+  const parts = accessToken.split('.');
+  if (parts.length < 2) return accessToken;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Record<string, string>;
+    return payload.sub ?? payload.sid ?? accessToken;
+  } catch {
+    return accessToken;
+  }
+}
+
 function parseResult(value: unknown): Record<string, unknown> | null {
   if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
   if (typeof value === 'string') {
@@ -32,6 +44,7 @@ export async function POST(req: Request) {
     const cookieStore = await cookies();
     const cookieToken = cookieStore.get('privy-token')?.value ?? null;
     const accessToken = bodyAccessToken ?? cookieToken;
+    const userId = sessionKeyFromAccessToken(accessToken);
     if (!accessToken) {
       return NextResponse.json({ error: 'Missing access token' }, { status: 401 });
     }
@@ -58,10 +71,11 @@ export async function POST(req: Request) {
       );
     }
 
-    const readRaw = await getMemory.invoke({ key });
+    const readRaw = await getMemory.invoke({ key, userId });
     return NextResponse.json({
       ok: true,
       key,
+      userId,
       read: parseResult(readRaw),
     });
   } catch (error) {

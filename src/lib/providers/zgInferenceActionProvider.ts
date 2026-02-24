@@ -8,10 +8,20 @@ import {
 import { z } from 'zod';
 import { ethers } from 'ethers';
 import { createZGComputeNetworkBroker } from '@0glabs/0g-serving-broker';
+import { Indexer } from '@0glabs/0g-ts-sdk';
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
 
 const ZG_RPC_URL = process.env.ZG_RPC_URL || 'https://evmrpc-testnet.0g.ai';
 const ZG_PRIVATE_KEY = process.env.ZG_PRIVATE_KEY!;
 const ZG_NETWORK = process.env.ZG_NETWORK || 'testnet';
+const ZG_INDEXER_RPC =
+  process.env.ZG_INDEXER_RPC || 'https://indexer-storage-testnet-turbo.0g.ai';
+const ZG_LOCAL_FALLBACK_PATH =
+  process.env.ZG_LOCAL_FALLBACK_PATH ?? path.join(process.cwd(), '.cache', 'zg-memory-fallback.json');
+const ZG_LOCAL_INDEX_PATH =
+  process.env.ZG_LOCAL_INDEX_PATH ?? path.join(process.cwd(), '.cache', 'zg-storage-index.json');
 
 const ZgChatSchema = z.object({
   message: z.string().describe('The user message to send to decentralized AI.'),
@@ -19,6 +29,15 @@ const ZgChatSchema = z.object({
     .string()
     .optional()
     .describe('Optional system prompt to set model behavior.'),
+  userId: z
+    .string()
+    .optional()
+    .describe('Optional Privy user ID for user-scoped memory namespace lookup.'),
+  includeStoredChatContext: z
+    .boolean()
+    .optional()
+    .default(true)
+    .describe('Whether to load and include latest stored chat context from 0G storage.'),
   providerAddress: z
     .string()
     .optional()
@@ -47,6 +66,133 @@ const ZgSetupProviderSchema = z.object({
 
 let brokerInstance: any = null;
 let brokerInitPromise: Promise<any> | null = null;
+
+function composeMemoryNamespace(address: string, userId?: string): string {
+  const wallet = address.toLowerCase();
+  const normalizedUserId = userId?.trim();
+  if (!normalizedUserId) return wallet;
+  return `privy:${normalizedUserId}:wallet:${wallet}`;
+}
+
+function memoryIndexKey(namespace: string, key: string): string {
+  return `user:${namespace}:${key}`;
+}
+
+async function readJsonObject(filePath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function downloadRootHash(rootHash: string): Promise<string> {
+  const indexer = new Indexer(ZG_INDEXER_RPC);
+  const outputPath = path.join(os.tmpdir(), `0g-inference-read-${Date.now()}.json`);
+  const downloadErr = await indexer.download(rootHash, outputPath, true);
+  if (downloadErr !== null) {
+    throw new Error(`Error downloading from 0G Storage: ${downloadErr}`);
+  }
+  const content = await fs.readFile(outputPath, 'utf-8');
+  await fs.unlink(outputPath).catch(() => undefined);
+  return content;
+}
+
+async function readStoredChatSummary(namespace: string): Promise<{
+  namespace: string;
+  key: string;
+  source: '0g_file' | 'local_file' | 'none';
+  rootHash?: string;
+  transactionHash?: string | null;
+  value?: string;
+  parsedValue?: Record<string, unknown> | null;
+  warning?: string;
+}> {
+  const key = 'chat_summary_latest';
+  const indexObj = await readJsonObject(ZG_LOCAL_INDEX_PATH);
+  const memory = (indexObj?.memory ?? {}) as Record<
+    string,
+    { rootHash?: string; transactionHash?: string | null }
+  >;
+  const entry = memory[memoryIndexKey(namespace, key)];
+
+  if (entry?.rootHash) {
+    try {
+      const raw = await downloadRootHash(entry.rootHash);
+      let parsedOuter: Record<string, unknown> | null = null;
+      let parsedValue: Record<string, unknown> | null = null;
+      try {
+        parsedOuter = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof parsedOuter.value === 'string') {
+          try {
+            parsedValue = JSON.parse(parsedOuter.value) as Record<string, unknown>;
+          } catch {
+            parsedValue = null;
+          }
+        }
+      } catch {
+        parsedOuter = null;
+      }
+      return {
+        namespace,
+        key,
+        source: '0g_file',
+        rootHash: entry.rootHash,
+        transactionHash: entry.transactionHash ?? null,
+        value: typeof parsedOuter?.value === 'string' ? parsedOuter.value : raw,
+        parsedValue,
+      };
+    } catch (err: any) {
+      const fallbackObj = await readJsonObject(ZG_LOCAL_FALLBACK_PATH);
+      const fallbackValue = (fallbackObj ?? {})[memoryIndexKey(namespace, key)];
+      if (typeof fallbackValue === 'string') {
+        let parsedValue: Record<string, unknown> | null = null;
+        try {
+          parsedValue = JSON.parse(fallbackValue) as Record<string, unknown>;
+        } catch {
+          parsedValue = null;
+        }
+        return {
+          namespace,
+          key,
+          source: 'local_file',
+          value: fallbackValue,
+          parsedValue,
+          warning: `0G read failed, used fallback: ${err.message}`,
+        };
+      }
+      return {
+        namespace,
+        key,
+        source: 'none',
+        warning: `0G read failed and no fallback found: ${err.message}`,
+      };
+    }
+  }
+
+  const fallbackObj = await readJsonObject(ZG_LOCAL_FALLBACK_PATH);
+  const fallbackValue = (fallbackObj ?? {})[memoryIndexKey(namespace, key)];
+  if (typeof fallbackValue === 'string') {
+    let parsedValue: Record<string, unknown> | null = null;
+    try {
+      parsedValue = JSON.parse(fallbackValue) as Record<string, unknown>;
+    } catch {
+      parsedValue = null;
+    }
+    return {
+      namespace,
+      key,
+      source: 'local_file',
+      value: fallbackValue,
+      parsedValue,
+      warning: 'No indexed 0G entry found; using local fallback memory.',
+    };
+  }
+
+  return { namespace, key, source: 'none', warning: 'No stored chat summary found for this namespace.' };
+}
 
 class ZgInferenceActionProvider extends ActionProvider<EvmWalletProvider> {
   constructor() {
@@ -220,11 +366,31 @@ class ZgInferenceActionProvider extends ActionProvider<EvmWalletProvider> {
     schema: ZgChatSchema,
   })
   async chat(
-    _walletProvider: EvmWalletProvider,
+    walletProvider: EvmWalletProvider,
     args: z.infer<typeof ZgChatSchema>
   ): Promise<string> {
     try {
       const broker = await this.getBroker();
+      const walletAddress = await walletProvider.getAddress();
+      const namespace = composeMemoryNamespace(walletAddress, args.userId);
+      const storedChatContext = args.includeStoredChatContext
+        ? await readStoredChatSummary(namespace)
+        : null;
+      if (storedChatContext) {
+        console.log(
+          '[zg-inference] loaded stored chat context',
+          JSON.stringify(
+            {
+              namespace: storedChatContext.namespace,
+              source: storedChatContext.source,
+              rootHash: storedChatContext.rootHash ?? null,
+              hasValue: Boolean(storedChatContext.value),
+            },
+            null,
+            2
+          )
+        );
+      }
       let providerAddress = args.providerAddress;
 
       if (!providerAddress) {
@@ -304,6 +470,10 @@ class ZgInferenceActionProvider extends ActionProvider<EvmWalletProvider> {
         {
           status: 'inference_complete',
           network: ZG_NETWORK,
+          namespace,
+          userId: args.userId ?? null,
+          walletAddress: walletAddress.toLowerCase(),
+          storedChatContext,
           provider: providerAddress,
           model,
           response: answer,

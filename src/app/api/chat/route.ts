@@ -132,6 +132,151 @@ function sanitizeAssistantReply(text: string): string {
   return text.replace(/```[\s\S]*?```/g, '').trim();
 }
 
+function truncateText(text: string, max = 240): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1)}…`;
+}
+
+function parseStoredMemoryValue(readResult: unknown): Record<string, unknown> | null {
+  const parsed = toObject(readResult);
+  if (!parsed) return null;
+  const rawValue = parsed.value;
+  if (typeof rawValue === 'string') {
+    try {
+      const inner = JSON.parse(rawValue);
+      if (typeof inner === 'object' && inner !== null) {
+        return inner as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+  }
+  if (typeof rawValue === 'object' && rawValue !== null) {
+    return rawValue as Record<string, unknown>;
+  }
+  return null;
+}
+
+function compactMemoryForPrompt(memory: Record<string, unknown>): Record<string, unknown> {
+  const turns = Array.isArray(memory.recentTurns)
+    ? memory.recentTurns
+        .filter((t) => t && typeof t === 'object')
+        .slice(-2)
+        .map((t) => {
+          const turn = t as Record<string, unknown>;
+          return {
+            userMessage:
+              typeof turn.userMessage === 'string' ? truncateText(turn.userMessage, 160) : null,
+            assistantReply:
+              typeof turn.assistantReply === 'string' ? truncateText(turn.assistantReply, 220) : null,
+            hadSwapExecution:
+              typeof turn.hadSwapExecution === 'boolean' ? turn.hadSwapExecution : null,
+            updatedAt: typeof turn.updatedAt === 'string' ? turn.updatedAt : null,
+          };
+        })
+    : [];
+
+  const swapContext = memory.swapContext;
+  const compactSwapContext =
+    swapContext && typeof swapContext === 'object'
+      ? {
+          lastSwapPair:
+            typeof (swapContext as Record<string, unknown>).lastSwapPair === 'string'
+              ? (swapContext as Record<string, unknown>).lastSwapPair
+              : null,
+          lastSwapAmount:
+            typeof (swapContext as Record<string, unknown>).lastSwapAmount === 'number'
+            || typeof (swapContext as Record<string, unknown>).lastSwapAmount === 'string'
+              ? (swapContext as Record<string, unknown>).lastSwapAmount
+              : null,
+          lastSwapTxHash:
+            typeof (swapContext as Record<string, unknown>).lastSwapTxHash === 'string'
+              ? (swapContext as Record<string, unknown>).lastSwapTxHash
+              : null,
+        }
+      : null;
+
+  return {
+    schemaVersion:
+      typeof memory.schemaVersion === 'string'
+        ? memory.schemaVersion
+        : null,
+    updatedAt: typeof memory.updatedAt === 'string' ? memory.updatedAt : null,
+    recentTurns: turns,
+    swapContext: compactSwapContext,
+  };
+}
+
+function buildUpdatedChatSummary(
+  prevMemory: Record<string, unknown> | null,
+  userMessage: string,
+  assistantReply: string,
+  swapRecord: Record<string, unknown> | null
+): Record<string, unknown> {
+  const previousTurnsRaw = Array.isArray(prevMemory?.recentTurns)
+    ? (prevMemory?.recentTurns as unknown[])
+    : [];
+  const previousTurns = previousTurnsRaw
+    .filter((t) => t && typeof t === 'object')
+    .map((t) => {
+      const turn = t as Record<string, unknown>;
+      return {
+        userMessage: typeof turn.userMessage === 'string' ? turn.userMessage : '',
+        assistantReply: typeof turn.assistantReply === 'string' ? turn.assistantReply : '',
+        hadSwapExecution: Boolean(turn.hadSwapExecution),
+        updatedAt:
+          typeof turn.updatedAt === 'string'
+            ? turn.updatedAt
+            : new Date().toISOString(),
+      };
+    });
+
+  const nextTurn = {
+    userMessage: truncateText(userMessage, 260),
+    assistantReply: truncateText(assistantReply, 340),
+    hadSwapExecution: Boolean(swapRecord),
+    updatedAt: new Date().toISOString(),
+  };
+  const recentTurns = [...previousTurns, nextTurn].slice(-3);
+
+  const prevSwapContext =
+    prevMemory?.swapContext && typeof prevMemory.swapContext === 'object'
+      ? (prevMemory.swapContext as Record<string, unknown>)
+      : {};
+  const nextSwapContext =
+    swapRecord
+      ? {
+          lastSwapPair:
+            `${String(swapRecord.sell ?? '').toUpperCase()}/${String(swapRecord.buy ?? '').toUpperCase()}`,
+          lastSwapAmount:
+            typeof swapRecord.amount === 'number' ? swapRecord.amount : null,
+          lastSwapTxHash: extractTxHash(swapRecord.result),
+          updatedAt: new Date().toISOString(),
+        }
+      : {
+          lastSwapPair:
+            typeof prevSwapContext.lastSwapPair === 'string' ? prevSwapContext.lastSwapPair : null,
+          lastSwapAmount:
+            typeof prevSwapContext.lastSwapAmount === 'number'
+            || typeof prevSwapContext.lastSwapAmount === 'string'
+              ? prevSwapContext.lastSwapAmount
+              : null,
+          lastSwapTxHash:
+            typeof prevSwapContext.lastSwapTxHash === 'string' ? prevSwapContext.lastSwapTxHash : null,
+          updatedAt:
+            typeof prevSwapContext.updatedAt === 'string'
+              ? prevSwapContext.updatedAt
+              : null,
+        };
+
+  return {
+    schemaVersion: 'v2',
+    updatedAt: new Date().toISOString(),
+    recentTurns,
+    swapContext: nextSwapContext,
+  };
+}
+
 function extractSwapStatus(value: unknown): string | null {
   const parsed = toObject(value);
   const status = parsed?.status;
@@ -169,31 +314,14 @@ export async function POST(req: Request) {
     const requestedWalletIdFromBody =
       typeof body.requestedWalletId === 'string' ? body.requestedWalletId : undefined;
 
-    const systemPrompt = `
-      You are Altair, a DeFi concierge on Ethereum Sepolia testnet.
-      Reply in plain English only.
-      Never output JSON, code blocks, or schema-like responses.
-      If the user asks for a swap and details are missing, ask a short clarifying question.
-    `;
-
-    // Actual OpenAI Call
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...history,
-        { role: 'user', content: message },
-      ],
-    });
-
-    const aiResponse = response.choices[0].message.content || '';
-
     const executionNote: string | null = null;
     let swapRecord: Record<string, unknown> | null = null;
     let zgTxHash: string | null = null;
     let zgError: string | null = null;
     let forcedResponse: string | null = null;
     let privyPairingWarning: string | null = null;
+    let priorMemory: Record<string, unknown> | null = null;
+    let memoryContextForPrompt: Record<string, unknown> | null = null;
     const sessionKey = sessionKeyFromAccessToken(accessToken);
 
     const getActions = async (
@@ -236,6 +364,54 @@ export async function POST(req: Request) {
     const findStorageSaveAction = (actions: ActionLike[]): ActionLike | undefined =>
       findAction(actions, 'zg_storage_save_memory')
       ?? actions.find((a) => a.name?.toLowerCase().includes('save_memory'));
+    const findStorageGetAction = (actions: ActionLike[]): ActionLike | undefined =>
+      findAction(actions, 'zg_storage_get_memory')
+      ?? actions.find((a) => a.name?.toLowerCase().includes('get_memory'));
+
+    // Pre-read latest user-scoped memory for token-safe prompt context.
+    if (accessToken) {
+      try {
+        const { actions } = await getActions(false);
+        const getMemoryAction = findStorageGetAction(actions);
+        if (getMemoryAction) {
+          const memoryReadResult = await getMemoryAction.invoke({
+            key: 'chat_summary_latest',
+            userId: sessionKey,
+          });
+          priorMemory = parseStoredMemoryValue(memoryReadResult);
+          if (priorMemory) {
+            memoryContextForPrompt = compactMemoryForPrompt(priorMemory);
+          }
+        }
+      } catch (memoryErr) {
+        console.warn('0G pre-read memory failed:', memoryErr);
+      }
+    }
+
+    const memoryBlock = memoryContextForPrompt
+      ? `\nUser Memory Context (from prior chats; may be stale):\n${JSON.stringify(memoryContextForPrompt)}`
+      : '\nUser Memory Context: none available yet.';
+
+    const systemPrompt = `
+      You are Altair, a DeFi concierge on Ethereum Sepolia testnet.
+      Reply in plain English only.
+      Never output JSON, code blocks, or schema-like responses.
+      If the user asks for a swap and details are missing, ask a short clarifying question.
+      Use the user memory context as helpful background, but prioritize the latest user message if there is any conflict.
+      ${memoryBlock}
+    `;
+
+    // Actual OpenAI Call
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...history,
+        { role: 'user', content: message },
+      ],
+    });
+
+    const aiResponse = response.choices[0].message.content || '';
 
     // Step 1: quote when swap intent appears.
     const swapIntent = extractSwapIntentFromMessage(message);
@@ -395,12 +571,14 @@ export async function POST(req: Request) {
         const summaryResult = await saveMemoryAction.invoke({
           key: 'chat_summary_latest',
           userId: sessionKey,
-          value: JSON.stringify({
-            userMessage: message,
-            aiResponse: forcedResponse ?? aiResponse,
-            hadSwapExecution: Boolean(swapRecord),
-            updatedAt: new Date().toISOString(),
-          }),
+          value: JSON.stringify(
+            buildUpdatedChatSummary(
+              priorMemory,
+              message,
+              forcedResponse ?? aiResponse,
+              swapRecord
+            )
+          ),
         });
         zgTxHash = extractTxHash(summaryResult) ?? zgTxHash;
 

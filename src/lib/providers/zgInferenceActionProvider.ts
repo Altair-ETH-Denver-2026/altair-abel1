@@ -369,14 +369,12 @@ class ZgInferenceActionProvider extends ActionProvider<EvmWalletProvider> {
     walletProvider: EvmWalletProvider,
     args: z.infer<typeof ZgChatSchema>
   ): Promise<string> {
-    try {
-      const broker = await this.getBroker();
-      const walletAddress = await walletProvider.getAddress();
-      const namespace = composeMemoryNamespace(walletAddress, args.userId);
-      const storedChatContext = args.includeStoredChatContext
-        ? await readStoredChatSummary(namespace)
-        : null;
-      if (storedChatContext) {
+    const walletAddress = await walletProvider.getAddress();
+    const namespace = composeMemoryNamespace(walletAddress, args.userId);
+    let storedChatContext: Awaited<ReturnType<typeof readStoredChatSummary>> | null = null;
+    if (args.includeStoredChatContext) {
+      try {
+        storedChatContext = await readStoredChatSummary(namespace);
         console.log(
           '[zg-inference] loaded stored chat context',
           JSON.stringify(
@@ -390,7 +388,18 @@ class ZgInferenceActionProvider extends ActionProvider<EvmWalletProvider> {
             2
           )
         );
+      } catch (contextErr: any) {
+        storedChatContext = {
+          namespace,
+          key: 'chat_summary_latest',
+          source: 'none',
+          warning: `Failed to read stored chat context: ${contextErr?.message ?? String(contextErr)}`,
+        };
       }
+    }
+
+    try {
+      const broker = await this.getBroker();
       let providerAddress = args.providerAddress;
 
       if (!providerAddress) {
@@ -485,7 +494,19 @@ class ZgInferenceActionProvider extends ActionProvider<EvmWalletProvider> {
         2
       );
     } catch (err: any) {
-      return `Inference error: ${err.message}`;
+      return JSON.stringify(
+        {
+          status: 'inference_error',
+          network: ZG_NETWORK,
+          namespace,
+          userId: args.userId ?? null,
+          walletAddress: walletAddress.toLowerCase(),
+          storedChatContext,
+          error: err.message,
+        },
+        null,
+        2
+      );
     }
   }
 

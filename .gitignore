@@ -26,6 +26,9 @@
 .idea/
 .cursor/
 .cache/
+.npm-cache/
+package-lock.json
+undefined
 
 # debug
 npm-debug.log*

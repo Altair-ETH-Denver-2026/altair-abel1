@@ -50,6 +50,22 @@ Related controls:
 - `ZG_LOCAL_FALLBACK_PATH` (default `.cache/zg-memory-fallback.json`)
 - `ZG_LOCAL_INDEX_PATH` (default `.cache/zg-storage-index.json`)
 
+## User-Scoped 0G Chat Memory
+
+Chat memory is persisted per user namespace and reused across sessions:
+
+- Namespace format: `privy:<userId>:wallet:<address>`
+- Primary key: `chat_summary_latest`
+- Storage backend: 0G file storage (with local fallback in hybrid mode)
+
+`/api/chat` flow:
+
+1. **Pre-read memory** using `zg_storage_get_memory` with `userId` + key.
+2. **Inject compact memory context** into the OpenAI system prompt (`User Memory Context`).
+3. **Post-write updated summary** to `chat_summary_latest` with a bounded schema (`v2`) for token-safe reuse.
+
+This enables user-specific recall after logout/login, as long as the same Privy user account is used.
+
 ### 0G SDK patch (Galileo testnet)
 
 The npm package `@0glabs/0g-ts-sdk` (v0.3.3) ships an ABI that does not match the current 0G Galileo testnet contract: the on-chain `Submission` struct includes an `address submitter` field. We apply a post-install patch so `flow.submit` uses the correct selector (`0xbc8c11f8`).
@@ -68,6 +84,17 @@ Preflight health endpoint:
 Write/read smoke test endpoint:
 
 - `POST /api/test-0g-write-read`
+
+User namespace alignment check:
+
+- `POST /api/test-0g-get-memory` (now passes `userId` namespace)
+
+Inference+storage integration e2e check:
+
+- `GET /api/test-zg-inference-storage-e2e`
+  - writes `chat_summary_latest`
+  - calls `zg_inference_chat` with the same `userId`
+  - returns `storedChatContext` in response for verification
 
 Low-level flow submit diagnostics script:
 
